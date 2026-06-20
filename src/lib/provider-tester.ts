@@ -76,9 +76,12 @@ async function testOpenAIKey(apiKey: string, baseUrl?: string): Promise<TestResu
     });
 
     // Parse rate limit headers
+    const remainingHeader = response.headers.get("x-ratelimit-remaining");
+    const resetHeader = response.headers.get("x-ratelimit-reset");
+    
     const rateLimit = {
-      remaining: response.headers.get("x-ratelimit-remaining"),
-      reset: response.headers.get("x-ratelimit-reset"),
+      remaining: remainingHeader ? parseInt(remainingHeader) : undefined,
+      reset: resetHeader || undefined,
     };
 
     if (response.ok) {
@@ -91,10 +94,7 @@ async function testOpenAIKey(apiKey: string, baseUrl?: string): Promise<TestResu
         message: `Connected successfully. Found ${models.length} models.`,
         details: {
           models: models.slice(0, 10), // First 10 models
-          rateLimit: {
-            remaining: rateLimit.remaining ? parseInt(rateLimit.remaining) : undefined,
-            reset: rateLimit.reset || undefined,
-          },
+          rateLimit,
         },
       };
     }

@@ -29,7 +29,7 @@ export function createMockRequest(
   const headers = new Headers(options?.headers || {});
   headers.set("content-type", "application/json");
 
-  const init: RequestInit = {
+  const init: any = {
     method,
     headers,
   };
@@ -68,7 +68,7 @@ export function createAuthenticatedRequest(
 /**
  * Extract JSON body from NextResponse.
  */
-export async function getResponseBody<T = any>(response: Response): Promise<T> {
+export async function getResponseBody<T = any>(response: Response): Promise<T | null> {
   const text = await response.text();
   return text ? JSON.parse(text) : null;
 }
@@ -79,7 +79,7 @@ export async function getResponseBody<T = any>(response: Response): Promise<T> {
 export async function expectResponse<T = any>(
   response: Response,
   expectedStatus: number
-): Promise<T> {
+): Promise<T | null> {
   if (response.status !== expectedStatus) {
     const body = await getResponseBody(response);
     throw new Error(

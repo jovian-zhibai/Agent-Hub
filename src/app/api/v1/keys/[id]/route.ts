@@ -56,7 +56,6 @@ export async function GET(
       modelCount: 0,
       agentCount: existing.keyBindings.length,
       createdAt: existing.createdAt.toISOString(),
-      failoverKeyId: existing.failoverKeyId ?? null,
       label: existing.keyLabel,
     };
 

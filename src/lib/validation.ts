@@ -171,7 +171,7 @@ export const telemetryEventSchema = z.object({
     "agent_enabled",
     "agent_disabled",
   ]),
-  payload: z.record(z.unknown()),
+  payload: z.record(z.string(), z.unknown()),
   timestamp: z.number().int().positive(),
 });
 
@@ -184,12 +184,12 @@ export const batchTelemetrySchema = z.object({
 // ──────────────────────────────────────────────
 
 export class ValidationError extends Error {
-  constructor(
-    message: string,
-    public errors: z.ZodError
-  ) {
+  public errors: z.ZodError;
+  
+  constructor(message: string, errors: z.ZodError) {
     super(message);
     this.name = "ValidationError";
+    this.errors = errors;
   }
 }
 
@@ -211,8 +211,8 @@ export function validate<T>(schema: z.ZodSchema<T>, data: unknown): T {
  * Format Zod errors into a user-friendly message.
  */
 export function formatValidationErrors(error: z.ZodError): string {
-  return error.errors
-    .map((err) => {
+  return error.issues
+    .map((err: z.ZodIssue) => {
       const path = err.path.join(".");
       return path ? `${path}: ${err.message}` : err.message;
     })
