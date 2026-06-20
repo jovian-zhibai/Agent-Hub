@@ -1,0 +1,80 @@
+# ──────────────────────────────────────────────
+# Agent Hub — Docker Compose Configuration
+# ──────────────────────────────────────────────
+
+services:
+  # PostgreSQL Database
+  postgres:
+    image: postgres:16-alpine
+    container_name: agent-hub-db
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-agenthub}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-agenthub}
+      POSTGRES_DB: ${POSTGRES_DB:-agenthub}
+    ports:
+      - "${POSTGRES_PORT:-5432}:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U agenthub"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - agent-hub-network
+
+  # Agent Hub Application (optional - for containerized deployment)
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: agent-hub-app
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      NODE_ENV: production
+      DATABASE_URL: postgresql://${POSTGRES_USER:-agenthub}:${POSTGRES_PASSWORD:-agenthub}@postgres:5432/${POSTGRES_DB:-agenthub}
+      JWT_SECRET: ${JWT_SECRET}
+      KEY_ENCRYPTION_KEY: ${KEY_ENCRYPTION_KEY}
+      NEXT_PUBLIC_API_URL: ${NEXT_PUBLIC_API_URL:-http://localhost:3000/api}
+    ports:
+      - "${APP_PORT:-3000}:3000"
+    networks:
+      - agent-hub-network
+    # Comment out for local development (run app locally instead)
+    profiles:
+      - production
+
+  # Redis (optional - for caching and sessions)
+  redis:
+    image: redis:7-alpine
+    container_name: agent-hub-redis
+    restart: unless-stopped
+    ports:
+      - "${REDIS_PORT:-6379}:6379"
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - agent-hub-network
+    profiles:
+      - production
+      - redis
+
+volumes:
+  pgdata:
+    driver: local
+  redis_data:
+    driver: local
+
+networks:
+  agent-hub-network:
+    driver: bridge
+

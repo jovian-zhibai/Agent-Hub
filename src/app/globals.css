@@ -1,0 +1,75 @@
+@import "tailwindcss";
+
+@theme {
+  --color-surface: #0f172a;
+  --color-surface-secondary: #1e293b;
+  --color-surface-tertiary: #334155;
+  --color-accent: #6366f1;
+  --color-accent-hover: #818cf8;
+  --color-accent-muted: #4f46e5;
+}
+
+/* ── Theme CSS Variables ───────────────────── */
+:root, [data-theme="dark"] {
+  --bg-primary: #0f172a;
+  --bg-secondary: #1e293b;
+  --text-primary: #f1f5f9;
+  --text-secondary: #94a3b8;
+}
+[data-theme="light"] {
+  --bg-primary: #ffffff;
+  --bg-secondary: #f8fafc;
+  --text-primary: #1a202c;
+  --text-secondary: #64748b;
+}
+
+@layer base {
+  body {
+    background-color: var(--bg-primary);
+    color: var(--text-primary);
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+  }
+}
+
+@layer components {
+  .status-dot {
+    display: inline-block;
+    width: 0.5rem;
+    height: 0.5rem;
+    border-radius: 9999px;
+  }
+  .status-dot--running {
+    background-color: #10b981;
+    box-shadow: 0 0 6px rgba(16, 185, 129, 0.5);
+  }
+  .status-dot--idle {
+    background-color: #64748b;
+  }
+  .status-dot--error {
+    background-color: #ef4444;
+    box-shadow: 0 0 6px rgba(239, 68, 68, 0.5);
+  }
+  .status-dot--paused {
+    background-color: #f59e0b;
+    box-shadow: 0 0 6px rgba(245, 158, 11, 0.5);
+  }
+  .status-dot--unknown {
+    background-color: #64748b;
+  }
+}
+
+/* Recharts dark theme overrides */
+.recharts-cartesian-grid-horizontal line,
+.recharts-cartesian-grid-vertical line {
+  stroke: #1e293b;
+}
+.recharts-text {
+  fill: #94a3b8;
+  font-size: 12px;
+}
+.recharts-tooltip-wrapper .recharts-default-tooltip {
+  background: #1e293b !important;
+  border: 1px solid #334155 !important;
+  border-radius: 8px !important;
+}

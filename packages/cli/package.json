@@ -1,0 +1,22 @@
+{
+  "name": "@agent-hub/cli",
+  "version": "1.0.0",
+  "description": "Agent Hub CLI — connect and sync your AI agents",
+  "type": "module",
+  "main": "./src/index.ts",
+  "bin": {
+    "agent-hub": "./bin/agent-hub"
+  },
+  "scripts": {
+    "start": "tsx src/index.ts",
+    "dev": "tsx watch src/index.ts"
+  },
+  "dependencies": {
+    "commander": "^12.0.0",
+    "tsx": "^4.7.0"
+  },
+  "devDependencies": {
+    "@types/node": "^25.9.3",
+    "typescript": "^6.0.3"
+  }
+}

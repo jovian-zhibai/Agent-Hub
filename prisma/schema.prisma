@@ -1,0 +1,325 @@
+// ──────────────────────────────────────────────
+// Agent Hub — Prisma Schema
+// PostgreSQL (Supabase-compatible) — Prisma 7
+// ──────────────────────────────────────────────
+
+generator client {
+  provider = "prisma-client"
+  output   = "../generated/prisma"
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+// ──────────────────────────────────────────────
+// Enums
+// ──────────────────────────────────────────────
+
+enum AgentStatus {
+  running
+  idle
+  disabled
+  offline
+  error
+}
+
+enum KeyHealth {
+  normal
+  warning
+  critical
+  rate_limited
+  invalid
+  stale
+}
+
+enum KeyScope {
+  personal
+  workspace
+}
+
+enum EventType {
+  tool_call
+  token_usage
+  permission_denied
+  key_health
+  heartbeat
+  key_failover
+  agent_enabled
+  agent_disabled
+}
+
+// ──────────────────────────────────────────────
+// Accounts
+// ──────────────────────────────────────────────
+
+model Account {
+  id        String   @id @default(uuid())
+  name      String
+  email     String   @unique
+  plan      String   // free / pro / team
+  passwordHash String @map("password_hash")
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  agents    Agent[]
+  keys      Key[]
+  telemetry TelemetryLog[]
+  auditLogs AuditLog[]
+
+  @@map("accounts")
+}
+
+// ──────────────────────────────────────────────
+// Agents
+// ──────────────────────────────────────────────
+
+model Agent {
+  id            String      @id @default(uuid())
+  accountId     String      @map("account_id")
+  name          String
+  description   String?
+  framework     String      // opencode / claude-code
+  status        AgentStatus @default(running)
+  machineId     String?     @map("machine_id")
+  safetyMode    Boolean     @default(false) @map("safety_mode")
+  monthlyBudget Decimal?    @map("monthly_budget")
+  monthlySpent  Decimal     @default(0) @map("monthly_spent")
+  enabled       Boolean     @default(true)
+  projectName   String      @default("") @map("project_name")
+  projectPath   String?     @map("project_path")
+  createdAt     DateTime    @default(now()) @map("created_at")
+  updatedAt     DateTime    @updatedAt @map("updated_at")
+
+  account      Account          @relation(fields: [accountId], references: [id], onDelete: Cascade)
+  keyBindings  KeyBinding[]
+  permission   Permission?
+  telemetry    TelemetryLog[]
+  hourlyAgg    TelemetryHourly[]
+  dailyAgg     TelemetryDaily[]
+  failoverLogs FailoverLog[]
+
+  @@unique([accountId, projectPath, name])
+  @@index([accountId, status])
+  @@map("agents")
+}
+
+// ──────────────────────────────────────────────
+// Providers
+// ──────────────────────────────────────────────
+
+model Provider {
+  id                 String   @id @default(uuid())
+  name               String   @unique
+  displayName        String   @map("display_name")
+  supportedProtocols Json     @map("supported_protocols") // JSONB, e.g. ["openai", "anthropic"]
+  baseUrls           Json     @map("base_urls")           // JSONB, e.g. {"openai": "https://api.openai.com"}
+  createdAt          DateTime @default(now()) @map("created_at")
+
+  keys   Key[]
+  models Model[]
+
+  @@map("providers")
+}
+
+// ──────────────────────────────────────────────
+// API Keys
+// ──────────────────────────────────────────────
+
+model Key {
+  id             String    @id @default(uuid())
+  accountId      String    @map("account_id")
+  providerId     String    @map("provider_id")
+  protocol       String    @default("openai")
+  keyLabel       String    @map("key_label")
+  keyEncrypted   String    @map("key_encrypted")   // AES-256-GCM encrypted
+  keyPrefix      String?   @map("key_prefix")       // First 8 chars for display
+  scope          KeyScope
+  workspaceId    String?   @map("workspace_id")
+  group          String?
+  note           String?
+  initialBalance Decimal?  @map("initial_balance")
+  balanceNote    String?   @map("balance_note")
+  health         KeyHealth @default(normal)
+  burnRate       Decimal?  @map("burn_rate")       // Daily average consumption rate
+  lastTestedAt   DateTime? @map("last_tested_at")
+  isActive       Boolean   @default(true) @map("is_active")
+  createdAt      DateTime  @default(now()) @map("created_at")
+  updatedAt      DateTime  @updatedAt @map("updated_at")
+
+  account      Account          @relation(fields: [accountId], references: [id], onDelete: Cascade)
+  provider     Provider         @relation(fields: [providerId], references: [id])
+  keyBindings  KeyBinding[]
+  telemetry    TelemetryLog[]
+  failoverFrom FailoverLog[]    @relation("failover_from")
+  failoverTo   FailoverLog[]    @relation("failover_to")
+
+  @@index([accountId, providerId])
+  @@map("keys")
+}
+
+// ──────────────────────────────────────────────
+// Key Bindings (Agent <-> Key M:N)
+// ──────────────────────────────────────────────
+
+model KeyBinding {
+  id        String   @id @default(uuid())
+  agentId   String   @map("agent_id")
+  keyId     String   @map("key_id")
+  priority  Int      // Lower = higher priority
+  status    String   // active / standby / depleted / failed
+  createdAt DateTime @default(now()) @map("created_at")
+
+  agent Agent @relation(fields: [agentId], references: [id], onDelete: Cascade)
+  key   Key   @relation(fields: [keyId], references: [id], onDelete: Cascade)
+
+  @@unique([agentId, keyId])
+  @@index([agentId, priority])
+  @@map("key_bindings")
+}
+
+// ──────────────────────────────────────────────
+// Permissions (per-agent tool-level rules)
+// ──────────────────────────────────────────────
+
+model Permission {
+  id         String   @id @default(uuid())
+  agentId    String   @unique @map("agent_id")
+  rules      Json     // JSONB — tool-level rules object
+  safetyMode Boolean  @default(false) @map("safety_mode")
+  version    Int      @default(1)
+  createdAt  DateTime @default(now()) @map("created_at")
+  updatedAt  DateTime @updatedAt @map("updated_at")
+
+  agent Agent @relation(fields: [agentId], references: [id], onDelete: Cascade)
+
+  @@map("permissions")
+}
+
+// ──────────────────────────────────────────────
+// Models (Pricing table)
+// ──────────────────────────────────────────────
+
+model Model {
+  id                 String   @id @default(uuid())
+  providerId         String   @map("provider_id")
+  defaultProtocol    String   @default("openai") @map("default_protocol")
+  supportedProtocols Json     @map("supported_protocols") // JSONB, e.g. ["openai", "anthropic"]
+  modelName          String   @map("model_name")     // code identifier, e.g. claude-sonnet-4
+  displayName        String   @map("display_name")   // display name, e.g. Claude Sonnet 4
+  pricingInput       Decimal  @map("pricing_input")  // USD per 1M tokens
+  pricingOutput      Decimal  @map("pricing_output") // USD per 1M tokens
+  pricingAsOf        DateTime? @map("pricing_as_of")
+  pricingSource      String    @default("unknown") @map("pricing_source") // litellm / openrouter / manual / unknown
+  isActive           Boolean   @default(true) @map("is_active")
+  createdAt          DateTime @default(now()) @map("created_at")
+
+  provider Provider @relation(fields: [providerId], references: [id])
+
+  @@unique([providerId, modelName])
+  @@map("models")
+}
+
+// ──────────────────────────────────────────────
+// Telemetry Logs
+// ──────────────────────────────────────────────
+
+model TelemetryLog {
+  id         String    @id @default(uuid())
+  agentId    String    @map("agent_id")
+  keyId      String?   @map("key_id")
+  accountId  String    @map("account_id")
+  eventType  EventType @map("event_type")
+  payload    Json      // JSONB
+  reportedAt DateTime  @map("reported_at")
+  ingestedAt DateTime  @default(now()) @map("ingested_at")
+
+  agent   Agent    @relation(fields: [agentId], references: [id], onDelete: Cascade)
+  key     Key?     @relation(fields: [keyId], references: [id])
+  account Account  @relation(fields: [accountId], references: [id])
+
+  @@index([agentId, reportedAt(sort: Desc)])
+  @@index([keyId, reportedAt(sort: Desc)])
+  @@index([eventType, reportedAt(sort: Desc)])
+  @@index([accountId, reportedAt(sort: Desc)])
+  @@map("telemetry_logs")
+}
+
+// ──────────────────────────────────────────────
+// Telemetry — Hourly Aggregation
+// ──────────────────────────────────────────────
+
+model TelemetryHourly {
+  agentId           String  @map("agent_id")
+  hour              DateTime
+  toolCalls         Int     @default(0) @map("tool_calls")
+  tokensInput       BigInt  @default(0) @map("tokens_input")
+  tokensOutput      BigInt  @default(0) @map("tokens_output")
+  cost              Decimal @default(0)
+  permissionsDenied Int     @default(0) @map("permissions_denied")
+
+  agent Agent @relation(fields: [agentId], references: [id], onDelete: Cascade)
+
+  @@id([agentId, hour])
+  @@map("telemetry_hourly")
+}
+
+// ──────────────────────────────────────────────
+// Telemetry — Daily Aggregation
+// ──────────────────────────────────────────────
+
+model TelemetryDaily {
+  agentId           String  @map("agent_id")
+  day               DateTime
+  toolCalls         Int     @default(0) @map("tool_calls")
+  tokensInput       BigInt  @default(0) @map("tokens_input")
+  tokensOutput      BigInt  @default(0) @map("tokens_output")
+  cost              Decimal @default(0)
+  permissionsDenied Int     @default(0) @map("permissions_denied")
+
+  agent Agent @relation(fields: [agentId], references: [id], onDelete: Cascade)
+
+  @@id([agentId, day])
+  @@map("telemetry_daily")
+}
+
+// ──────────────────────────────────────────────
+// Failover Logs
+// ──────────────────────────────────────────────
+
+model FailoverLog {
+  id          String   @id @default(uuid())
+  agentId     String   @map("agent_id")
+  fromKeyId   String   @map("from_key_id")
+  toKeyId     String   @map("to_key_id")
+  reason      String   // rate_limited / invalid / manual_switch
+  triggeredAt DateTime @map("triggered_at")
+
+  agent   Agent @relation(fields: [agentId], references: [id], onDelete: Cascade)
+  fromKey Key   @relation("failover_from", fields: [fromKeyId], references: [id])
+  toKey   Key   @relation("failover_to", fields: [toKeyId], references: [id])
+
+  @@index([agentId, triggeredAt(sort: Desc)])
+  @@map("failover_logs")
+}
+
+// ──────────────────────────────────────────────
+// Audit Logs
+// ──────────────────────────────────────────────
+
+model AuditLog {
+  id          String   @id @default(uuid())
+  accountId   String   @map("account_id")
+  operatorId  String?  @map("operator_id")  // null = system
+  action      String   // key_added / key_deleted / permission_changed / etc.
+  targetType  String   @map("target_type")  // agent / key / workspace
+  targetId    String   @map("target_id")
+  details     Json?    // JSONB — before/after diff
+  createdAt   DateTime @default(now()) @map("created_at")
+
+  account Account @relation(fields: [accountId], references: [id])
+
+  @@index([accountId, createdAt(sort: Desc)])
+  @@index([action, createdAt(sort: Desc)])
+  @@map("audit_logs")
+}

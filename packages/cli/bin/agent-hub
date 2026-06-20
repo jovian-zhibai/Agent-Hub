@@ -1,0 +1,5 @@
+#!/usr/bin/env bash
+set -e
+# Resolve the npm link symlink to find the real package directory
+pkg_dir="$(python3 -c "import os; print(os.path.dirname(os.path.dirname(os.path.realpath('$0'))))")"
+exec "$pkg_dir/node_modules/.bin/tsx" "$pkg_dir/src/index.ts" "$@"
