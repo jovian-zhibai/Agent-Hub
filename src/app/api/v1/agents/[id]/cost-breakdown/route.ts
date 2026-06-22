@@ -1,6 +1,10 @@
 import { NextRequest, NextResponse } from "next/server";
 import { prisma } from "@/lib/prisma";
 import { getAuthUser, ApiError } from "@/lib/auth";
+import {
+  loadPricingMap,
+  computeEventCost,
+} from "@/lib/cost";
 
 // ──────────────────────────────────────────────
 // Types
@@ -22,33 +26,47 @@ interface CostBreakdownResponse {
   lastUpdated: string;
 }
 
-interface TokenUsagePayload {
-  model?: string;
-  promptTokens?: number;
-  completionTokens?: number;
-  totalTokens?: number;
-}
-
 // ──────────────────────────────────────────────
 // Helpers
 // ──────────────────────────────────────────────
 
-function computeStartDate(range: string | null): Date {
+/**
+ * Compute the UTC start-of-day `days` days ago.
+ *
+ * B10: previously used `new Date()` + `setHours(0,0,0,0)` which
+ * buckets by server-local time, drifting from the UTC day buckets
+ * used at ingest time. Now aligned with the rest of the cost
+ * surfaces (dashboard, cost-trend, agents route).
+ */
+function computeStartDateUTC(range: string | null): Date {
   const days = range === "30d" ? 30 : 7;
-  const d = new Date();
-  d.setDate(d.getDate() - days);
-  d.setHours(0, 0, 0, 0);
-  return d;
+  const now = new Date();
+  return new Date(
+    Date.UTC(
+      now.getUTCFullYear(),
+      now.getUTCMonth(),
+      now.getUTCDate() - days,
+      0,
+      0,
+      0,
+      0,
+    ),
+  );
 }
 
 // ──────────────────────────────────────────────
 // GET /api/v1/agents/:id/cost-breakdown?range=7d|30d
 // 返回按模型的花费明细
+//
+// Note: per-model breakdown still scans telemetry_logs because
+// TelemetryDaily has no `model` dimension. We do, however,
+// centralize token extraction + cost math via `cost.ts` so the
+// numbers match every other cost surface (fixes B9 + B14).
 // ──────────────────────────────────────────────
 
 export async function GET(
   request: NextRequest,
-  { params }: { params: Promise<{ id: string }> }
+  { params }: { params: Promise<{ id: string }> },
 ) {
   try {
     const user = await getAuthUser(request);
@@ -63,21 +81,21 @@ export async function GET(
     if (!agent) {
       return NextResponse.json(
         { code: "NOT_FOUND", message: "Agent not found" },
-        { status: 404 }
+        { status: 404 },
       );
     }
 
     if (agent.accountId !== user.id) {
       return NextResponse.json(
         { code: "FORBIDDEN", message: "Access denied" },
-        { status: 403 }
+        { status: 403 },
       );
     }
 
     // ── Parse query params ────────────────────
     const { searchParams } = new URL(request.url);
     const range = searchParams.get("range");
-    const startDate = computeStartDate(range);
+    const startDate = computeStartDateUTC(range);
 
     // ── Fetch token_usage events ──────────────
     const usageEvents = await prisma.telemetryLog.findMany({
@@ -91,51 +109,46 @@ export async function GET(
 
     if (usageEvents.length === 0) {
       return NextResponse.json(
-        { breakdown: [], total: 0, lastUpdated: new Date().toISOString() } satisfies CostBreakdownResponse,
-        { status: 200 }
+        {
+          breakdown: [],
+          total: 0,
+          lastUpdated: new Date().toISOString(),
+        } satisfies CostBreakdownResponse,
+        { status: 200 },
       );
     }
 
-    // ── Load models pricing lookup ────────────
-    const allModels = await prisma.model.findMany({
-      where: { isActive: true },
-      select: {
-        modelName: true,
-        displayName: true,
-        pricingInput: true,
-        pricingOutput: true,
-      },
+    // ── Load pricing lookup (centralized) ─────
+    const pricingMap = await loadPricingMap(prisma, {
+      includeDisplayName: true,
     });
-    const pricingMap = new Map<string, { displayName: string; pricingInput: number; pricingOutput: number }>();
-    for (const m of allModels) {
-      if (!pricingMap.has(m.modelName)) {
-        pricingMap.set(m.modelName, {
-          displayName: m.displayName,
-          pricingInput: Number(m.pricingInput),
-          pricingOutput: Number(m.pricingOutput),
-        });
-      }
-    }
 
     // ── Aggregate by model ────────────────────
     const modelMap = new Map<
       string,
-      { cost: number; calls: number; tokensIn: number; tokensOut: number }
+      {
+        cost: number;
+        calls: number;
+        tokensIn: number;
+        tokensOut: number;
+      }
     >();
 
     for (const event of usageEvents) {
-      const payload = event.payload as TokenUsagePayload;
-      const model = payload.model ?? "unknown";
-      const tokensIn = payload.promptTokens ?? 0;
-      const tokensOut = payload.completionTokens ?? 0;
+      // computeEventCost handles both tokensIn/tokensOut (new)
+      // and promptTokens/completionTokens (legacy) — fixes B9.
+      const { cost, tokensIn, tokensOut, model } = computeEventCost(
+        event.payload as Record<string, unknown>,
+        pricingMap,
+      );
 
-      const pricing = pricingMap.get(model);
-      let cost = 0;
-      if (pricing) {
-        cost = (tokensIn * pricing.pricingInput + tokensOut * pricing.pricingOutput) / 1_000_000;
-      }
-
-      const existing = modelMap.get(model) ?? { cost: 0, calls: 0, tokensIn: 0, tokensOut: 0 };
+      const existing =
+        modelMap.get(model) ?? {
+          cost: 0,
+          calls: 0,
+          tokensIn: 0,
+          tokensOut: 0,
+        };
       modelMap.set(model, {
         cost: existing.cost + cost,
         calls: existing.calls + 1,
@@ -146,7 +159,13 @@ export async function GET(
 
     // ── Compute totals ────────────────────────
     let totalCost = 0;
-    const rawItems: Array<{ model: string; cost: number; calls: number; tokensIn: number; tokensOut: number }> = [];
+    const rawItems: Array<{
+      model: string;
+      cost: number;
+      calls: number;
+      tokensIn: number;
+      tokensOut: number;
+    }> = [];
 
     for (const [model, data] of modelMap) {
       totalCost += data.cost;
@@ -177,20 +196,23 @@ export async function GET(
         total: Math.round(totalCost * 1000000) / 1000000,
         lastUpdated: new Date().toISOString(),
       } satisfies CostBreakdownResponse,
-      { status: 200 }
+      { status: 200 },
     );
   } catch (error) {
     if (error instanceof ApiError) {
       return NextResponse.json(
-        { code: error.name === "AuthError" ? "AUTH_ERROR" : "API_ERROR", message: error.message },
-        { status: error.statusCode }
+        {
+          code: error.name === "AuthError" ? "AUTH_ERROR" : "API_ERROR",
+          message: error.message,
+        },
+        { status: error.statusCode },
       );
     }
 
     console.error("[agents/id/cost-breakdown] Unexpected error:", error);
     return NextResponse.json(
       { code: "INTERNAL_ERROR", message: "Internal server error" },
-      { status: 500 }
+      { status: 500 },
     );
   }
 }

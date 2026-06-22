@@ -37,11 +37,10 @@ export async function GET(request: NextRequest) {
     });
 
     // ── Compute aggregates from telemetry ──────
+    // B10: use UTC for consistency with ingest-side bucketing
     const now = new Date();
     const todayStart = new Date(
-      now.getFullYear(),
-      now.getMonth(),
-      now.getDate()
+      Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate())
     );
 
     const agentIds = agents.map((a) => a.id);

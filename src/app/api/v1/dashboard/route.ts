@@ -1,7 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { prisma } from "@/lib/prisma";
 import { getAuthUser, ApiError } from "@/lib/auth";
-import { loadPricingMap, computeEventCost } from "@/lib/cost";
 
 // ──────────────────────────────────────────────
 // Types
@@ -46,6 +45,7 @@ interface KeyOverviewItem {
   provider: { name: string };
   health: string;
   remaining: number | null;
+  spent: number;
   burnRate: number | null;
 }
 
@@ -58,45 +58,40 @@ interface DashboardResponse {
   keyOverview: KeyOverviewItem[];
 }
 
-interface TokenUsagePayload {
-  model?: string;
-  promptTokens?: number;
-  completionTokens?: number;
-  tokensIn?: number;
-  tokensOut?: number;
-}
-
 // ──────────────────────────────────────────────
-// Helpers
+// UTC Date Helpers (B10: unify timezone to UTC)
 // ──────────────────────────────────────────────
 
-function dateKey(d: Date): string {
-  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+function utcDateKey(d: Date): string {
+  return `${d.getUTCFullYear()}-${String(d.getUTCMonth() + 1).padStart(2, "0")}-${String(d.getUTCDate()).padStart(2, "0")}`;
 }
 
-function todayStart(): Date {
+function todayStartUTC(): Date {
   const d = new Date();
-  d.setHours(0, 0, 0, 0);
+  d.setUTCHours(0, 0, 0, 0);
   return d;
 }
 
-function monthStart(): Date {
+function monthStartUTC(): Date {
   const d = new Date();
-  d.setDate(1);
-  d.setHours(0, 0, 0, 0);
+  d.setUTCDate(1);
+  d.setUTCHours(0, 0, 0, 0);
   return d;
 }
 
-function daysAgo(n: number): Date {
+function daysAgoUTC(n: number): Date {
   const d = new Date();
-  d.setDate(d.getDate() - n);
-  d.setHours(0, 0, 0, 0);
+  d.setUTCDate(d.getUTCDate() - n);
+  d.setUTCHours(0, 0, 0, 0);
   return d;
 }
 
 // ──────────────────────────────────────────────
 // GET /api/v1/dashboard
 // 返回仪表盘首页需要的全部数据
+// B4: reads TelemetryDaily aggregation table instead of
+//     scanning raw telemetry_logs (O(1) vs O(N) per load)
+// B10: all date buckets use UTC for consistency with ingest
 // ──────────────────────────────────────────────
 
 export async function GET(request: NextRequest) {
@@ -108,12 +103,11 @@ export async function GET(request: NextRequest) {
     const [
       agentCounts,
       keyCounts,
-      monthlyCostEvents,
-      todayCallsCount,
-      interceptsTodayCount,
+      monthlyCostAgg,
+      todayAgg,
       agents,
       keys,
-      costTrendEvents,
+      costTrendDaily,
     ] = await Promise.all([
       // Agent counts
       prisma.agent.groupBy({
@@ -129,32 +123,22 @@ export async function GET(request: NextRequest) {
         _count: { id: true },
       }),
 
-      // Monthly cost (token_usage events this month)
-      prisma.telemetryLog.findMany({
+      // B4: Monthly cost from aggregation table (not raw logs)
+      prisma.telemetryDaily.aggregate({
         where: {
-          accountId,
-          eventType: "token_usage",
-          reportedAt: { gte: monthStart() },
+          agent: { accountId },
+          day: { gte: monthStartUTC() },
         },
-        select: { payload: true },
+        _sum: { cost: true },
       }),
 
-      // Today's tool calls
-      prisma.telemetryLog.count({
+      // B4: Today's calls + intercepts from aggregation table
+      prisma.telemetryDaily.aggregate({
         where: {
-          accountId,
-          eventType: "tool_call",
-          reportedAt: { gte: todayStart() },
+          agent: { accountId },
+          day: { equals: todayStartUTC() },
         },
-      }),
-
-      // Today's intercepts (permission denied)
-      prisma.telemetryLog.count({
-        where: {
-          accountId,
-          eventType: "permission_denied",
-          reportedAt: { gte: todayStart() },
-        },
+        _sum: { toolCalls: true, permissionsDenied: true },
       }),
 
       // Agent list with key bindings
@@ -175,10 +159,10 @@ export async function GET(request: NextRequest) {
             take: 1,
           },
         },
-orderBy: [{ projectName: "asc" }, { createdAt: "desc" }],
+        orderBy: [{ projectName: "asc" }, { createdAt: "desc" }],
       }),
 
-      // Key overview
+      // Key overview — include currentBalance + spent for accurate display
       prisma.key.findMany({
         where: { accountId },
         include: {
@@ -187,15 +171,14 @@ orderBy: [{ projectName: "asc" }, { createdAt: "desc" }],
         orderBy: { createdAt: "desc" },
       }),
 
-      // Cost trend (last 7 days token_usage)
-      prisma.telemetryLog.findMany({
+      // B4: 7-day cost trend from aggregation table
+      prisma.telemetryDaily.findMany({
         where: {
-          accountId,
-          eventType: "token_usage",
-          reportedAt: { gte: daysAgo(7) },
+          agent: { accountId },
+          day: { gte: daysAgoUTC(7) },
         },
-        select: { payload: true, reportedAt: true },
-        orderBy: { reportedAt: "asc" },
+        orderBy: { day: "asc" },
+        select: { day: true, cost: true },
       }),
     ]);
 
@@ -216,34 +199,26 @@ orderBy: [{ projectName: "asc" }, { createdAt: "desc" }],
     }
     const keyCount = keyCounts.reduce((sum, r) => sum + r._count.id, 0);
 
-    // ── Load models pricing ───────────────────
-    const pricingMap = await loadPricingMap(prisma, { includeDisplayName: true });
-
-    // ── Calculate monthly cost ────────────────
-    let totalCostThisMonth = 0;
-    for (const event of monthlyCostEvents) {
-      const { cost } = computeEventCost(event.payload as Record<string, unknown>, pricingMap);
-      totalCostThisMonth += cost;
-    }
+    const totalCostThisMonth = Number(monthlyCostAgg._sum.cost ?? 0);
+    const totalCallsToday = todayAgg._sum.toolCalls ?? 0;
+    const interceptsToday = todayAgg._sum.permissionsDenied ?? 0;
 
     // ── Build agent list ──────────────────────
     const agentIds = agents.map((a) => a.id);
 
-    // Batch query today's calls per agent
-    const todayCallsRaw = await prisma.telemetryLog.groupBy({
-      by: ["agentId"],
+    // B4: per-agent today calls from aggregation table
+    const todayCallsDaily = await prisma.telemetryDaily.findMany({
       where: {
         agentId: { in: agentIds },
-        reportedAt: { gte: todayStart() },
-        eventType: "tool_call",
+        day: { equals: todayStartUTC() },
       },
-      _count: { id: true },
+      select: { agentId: true, toolCalls: true },
     });
     const todayCallsMap = new Map(
-      todayCallsRaw.map((r) => [r.agentId, r._count.id])
+      todayCallsDaily.map((r) => [r.agentId, r.toolCalls])
     );
 
-    // Last heartbeat per agent
+    // Last heartbeat per agent (still from raw logs — no aggregate for this)
     const lastHeartbeats = await prisma.telemetryLog.findMany({
       where: {
         agentId: { in: agentIds },
@@ -283,27 +258,25 @@ orderBy: [{ projectName: "asc" }, { createdAt: "desc" }],
       };
     });
 
-    // ── Build cost trend (last 7 days) ────────
-    const dayMap = new Map<string, number>();
-    for (const event of costTrendEvents) {
-      const day = dateKey(event.reportedAt);
-      const { cost } = computeEventCost(event.payload as Record<string, unknown>, pricingMap);
-      dayMap.set(day, (dayMap.get(day) ?? 0) + cost);
-    }
-
-    const sortedDays = Array.from(dayMap.keys()).sort();
-    const costTrend: CostTrendPoint[] = sortedDays.map((date) => ({
-      date,
-      cost: Math.round(dayMap.get(date)! * 1000000) / 1000000,
+    // ── Build cost trend (last 7 days from aggregate) ───
+    const costTrend: CostTrendPoint[] = costTrendDaily.map((row) => ({
+      date: utcDateKey(row.day),
+      cost: Math.round(Number(row.cost) * 1000000) / 1000000,
     }));
 
     // ── Build key overview ────────────────────
+    // B3 fix: use currentBalance (live remaining) not initialBalance
     const keyOverview: KeyOverviewItem[] = keys.map((key) => ({
       id: key.id,
       keyLabel: key.keyLabel,
       provider: { name: key.provider.name },
       health: key.health,
-      remaining: key.initialBalance ? Number(key.initialBalance) : null,
+      remaining: key.currentBalance !== null
+        ? Number(key.currentBalance)
+        : key.initialBalance !== null
+          ? Number(key.initialBalance)
+          : null,
+      spent: Number(key.spent),
       burnRate: key.burnRate ? Number(key.burnRate) : null,
     }));
 
@@ -330,8 +303,8 @@ orderBy: [{ projectName: "asc" }, { createdAt: "desc" }],
         keyHealthy,
         keyWarning,
         totalCostThisMonth: Math.round(totalCostThisMonth * 1000000) / 1000000,
-        totalCallsToday: todayCallsCount,
-        interceptsToday: interceptsTodayCount,
+        totalCallsToday,
+        interceptsToday,
       },
       agentList,
       projects,
