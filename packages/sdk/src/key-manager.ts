@@ -15,6 +15,15 @@ export interface KeyBinding {
   provider: string;
   protocol: string;
   status: "active" | "standby" | "depleted" | "failed";
+  /**
+   * B5: Timestamp (ms since epoch) when a rate-limited key becomes
+   * usable again. Null = not rate-limited.
+   *
+   * When a key receives a 429, the SDK sets this to `Date.now() + retryAfterMs`
+   * and temporarily marks the binding as "standby" (NOT "failed"). The key
+   * stays in the pool and is automatically re-promoted once the window expires.
+   */
+  rateLimitedUntil?: number | null;
 }
 
 export interface KeyManagerConfig {
@@ -35,6 +44,13 @@ export interface ProviderConfig {
 
 const CACHE_KEY = "key-bindings";
 const PROVIDER_CACHE_KEY = "providers";
+
+/**
+ * B5: Default retry-after window (60s) when the provider doesn't
+ * return a Retry-After header. Most providers (OpenAI, Anthropic)
+ * rate-limit for 30-60s, so 60s is a safe upper bound.
+ */
+const DEFAULT_RETRY_AFTER_MS = 60_000;
 
 // ──────────────────────────────────────────────
 // KeyManager
@@ -60,6 +76,10 @@ export class KeyManager {
    *
    * P0 Bug 3 fix: has explicit termination condition — if promoteStandby
    * fails to find a viable key, returns null instead of recursing infinitely.
+   *
+   * B5 fix: before selecting a key, recovers any keys whose rate-limit
+   * window has expired, so they can be re-promoted instead of being
+   * permanently stuck in "standby".
    */
   async getActiveKey(): Promise<KeyBinding | null> {
     await this.ensureLoaded();
@@ -67,6 +87,9 @@ export class KeyManager {
     if (this.disabled || this.bindings.length === 0) {
       return null;
     }
+
+    // B5: Recover any keys whose rate-limit window has expired.
+    this.recoverRateLimitedKeys();
 
     // If we already have a current index and it's still valid, return it
     if (this.currentIndex >= 0 && this.currentIndex < this.bindings.length) {
@@ -123,8 +146,24 @@ export class KeyManager {
   /**
    * Mark a key as failed and automatically fail over to the next available key.
    * Returns the new active key, or null if no fallback exists.
+   *
+   * B5 fix: rate-limited keys are NO LONGER permanently marked "failed".
+   * Instead they go to "standby" with a `rateLimitedUntil` timestamp and
+   * are automatically recovered by `getActiveKey()` once the window expires.
+   * Only "depleted" and other permanent failures are marked "failed".
+   *
+   * @param failedKeyId  The key that failed
+   * @param opts.retryAfterMs  For 429 rate-limit: ms until the key is usable
+   *                           again. If omitted, uses DEFAULT_RETRY_AFTER_MS.
+   *                           Ignored for non-rate-limit failures.
+   * @param opts.reason   Override the failure reason. If omitted, inferred
+   *                      from current status: "depleted" → permanent, else
+   *                      "rate_limited" (temporary).
    */
-  async handleFailure(failedKeyId: string): Promise<KeyBinding | null> {
+  async handleFailure(
+    failedKeyId: string,
+    opts?: { retryAfterMs?: number; reason?: "rate_limited" | "depleted" | "invalid" },
+  ): Promise<KeyBinding | null> {
     await this.ensureLoaded();
 
     const failedBinding = this.bindings.find((b) => b.keyId === failedKeyId);
@@ -132,19 +171,38 @@ export class KeyManager {
       return null;
     }
 
-    // Determine the reason based on current status
-    const reason = failedBinding.status === "depleted"
-      ? "depleted"
-      : "rate_limited";
+    // Determine the reason: explicit override > inferred from status
+    const reason =
+      opts?.reason ??
+      (failedBinding.status === "depleted" ? "depleted" : "rate_limited");
 
-    // Mark as failed
-    failedBinding.status = "failed";
+    const isTemporary = reason === "rate_limited";
+
+    if (isTemporary) {
+      // B5: Rate-limited keys are temporarily parked as "standby" with
+      // a recovery timestamp. They stay in the pool and are re-promoted
+      // automatically once the window expires.
+      const retryAfterMs = opts?.retryAfterMs ?? DEFAULT_RETRY_AFTER_MS;
+      failedBinding.status = "standby";
+      failedBinding.rateLimitedUntil = Date.now() + retryAfterMs;
+    } else {
+      // Permanent failure (depleted / invalid) — mark as "failed" for real
+      failedBinding.status = "failed";
+      failedBinding.rateLimitedUntil = null;
+    }
+
     this.currentIndex = -1;
 
     await this.reportEvent({
       type: "key_failover",
       keyId: failedKeyId,
-      payload: { reason, fromKeyId: failedKeyId },
+      payload: {
+        reason,
+        fromKeyId: failedKeyId,
+        ...(isTemporary
+          ? { retryAfterMs: opts?.retryAfterMs ?? DEFAULT_RETRY_AFTER_MS }
+          : {}),
+      },
     });
 
     // Try to promote the next standby key
@@ -154,6 +212,24 @@ export class KeyManager {
     await this.persistBindings();
 
     return promoted; // null = no failover available (termination condition met)
+  }
+
+  /**
+   * B5: Mark a key as rate-limited without going through the full
+   * `handleFailure` path. Use this when the SDK receives a 429 and
+   * wants to park the key temporarily + fail over, but doesn't want
+   * to emit a "depleted" or "invalid" signal.
+   *
+   * Equivalent to `handleFailure(keyId, { reason: "rate_limited", retryAfterMs })`.
+   */
+  async handleRateLimit(
+    keyId: string,
+    retryAfterMs?: number,
+  ): Promise<KeyBinding | null> {
+    return this.handleFailure(keyId, {
+      reason: "rate_limited",
+      retryAfterMs,
+    });
   }
 
   /**
@@ -213,6 +289,43 @@ export class KeyManager {
    */
   private findActiveBinding(): KeyBinding | null {
     return this.bindings.find((b) => b.status === "active") ?? null;
+  }
+
+  /**
+   * B5: Scan all bindings and reset any keys whose rate-limit window
+   * has expired back to "standby" (so they can be re-promoted).
+   *
+   * Called at the start of `getActiveKey()` so the SDK naturally
+   * recovers rate-limited keys without needing a background timer.
+   * This is a synchronous, in-memory operation — no I/O.
+   *
+   * If any keys were recovered, re-enables the agent (in case it
+   * was disabled because all keys were temporarily rate-limited).
+   */
+  private recoverRateLimitedKeys(): void {
+    const now = Date.now();
+    let recovered = false;
+
+    for (const b of this.bindings) {
+      if (
+        b.rateLimitedUntil !== null &&
+        b.rateLimitedUntil !== undefined &&
+        b.rateLimitedUntil <= now &&
+        b.status === "standby"
+      ) {
+        // Rate-limit window expired — clear the timestamp.
+        // Status stays "standby" so promoteStandby() can pick it up.
+        b.rateLimitedUntil = null;
+        recovered = true;
+      }
+    }
+
+    // If we recovered any keys and the agent was disabled (because all
+    // keys were temporarily rate-limited), re-enable it so getActiveKey
+    // can try promoting a recovered key.
+    if (recovered && this.disabled) {
+      this.disabled = false;
+    }
   }
 
   /**
