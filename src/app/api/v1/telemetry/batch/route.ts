@@ -3,6 +3,11 @@ import { prisma } from "@/lib/prisma";
 import { getAuthUser, verifyAgentToken, ApiError } from "@/lib/auth";
 import { broadcastEvent } from "@/app/api/v1/events/route";
 import { loadPricingMap, computeEventCost } from "@/lib/cost";
+import {
+  enforceAgentBudget,
+  buildBudgetAlert,
+  type BudgetAlert,
+} from "@/lib/budget";
 
 // ──────────────────────────────────────────────
 // POST /api/v1/telemetry/batch
@@ -80,6 +85,7 @@ export async function POST(request: NextRequest) {
     const validEvents = events.filter((e) => userAgentIds.has(e.agentId));
 
     let ingested = 0;
+    const budgetAlerts: BudgetAlert[] = [];
     if (validEvents.length > 0) {
       // B1/B3: load pricing once to compute per-event cost for budget tracking
       const pricingMap =
@@ -149,11 +155,56 @@ export async function POST(request: NextRequest) {
           if (isTokenUsage) {
             const { cost, tokensIn, tokensOut } = computeEventCost(event.payload, pricingMap);
 
+            // B1: fetch current agent state BEFORE incrementing so we can
+            // detect threshold crossings (80% warning / 100% auto-disable).
+            const agentBefore = await tx.agent.findUnique({
+              where: { id: event.agentId },
+              select: {
+                monthlySpent: true,
+                monthlyBudget: true,
+                enabled: true,
+              },
+            });
+
+            const prevSpent = agentBefore ? Number(agentBefore.monthlySpent) : 0;
+            const monthlyBudget = agentBefore?.monthlyBudget
+              ? Number(agentBefore.monthlyBudget)
+              : null;
+            const wasEnabled = agentBefore?.enabled ?? true;
+
             // B1: agent budget accumulator
             await tx.agent.update({
               where: { id: event.agentId },
               data: { monthlySpent: { increment: cost } },
             });
+
+            // B1: budget enforcement — 80% warning + 100% auto-disable.
+            // Runs inside the same transaction so the audit log + agent
+            // disable roll back together if anything downstream fails.
+            if (agentBefore && monthlyBudget !== null && monthlyBudget > 0) {
+              const budgetResult = await enforceAgentBudget(tx, {
+                agentId: event.agentId,
+                accountId: userId,
+                prevSpent,
+                eventCost: cost,
+                monthlyBudget,
+                wasEnabled,
+                triggeredAt: reportedAt.toISOString(),
+              });
+
+              const alert = buildBudgetAlert(
+                {
+                  agentId: event.agentId,
+                  accountId: userId,
+                  prevSpent,
+                  newSpent: prevSpent + cost,
+                  budget: monthlyBudget,
+                  triggeredAt: reportedAt.toISOString(),
+                },
+                budgetResult,
+              );
+              if (alert) budgetAlerts.push(alert);
+            }
 
             // B3: key spend tracking — increment spent; decrement currentBalance
             // only if the key tracks a balance (null = unlimited / prepaid elsewhere).
@@ -253,6 +304,23 @@ export async function POST(request: NextRequest) {
           keyId: event.keyId,
         });
       }
+    }
+
+    // ── Broadcast budget alerts (B1) ──────────
+    // Emitted after the ingestion loop so the dashboard receives
+    // a single coherent alert per threshold crossing, tagged with
+    // the triggering event's timestamp.
+    for (const alert of budgetAlerts) {
+      broadcastEvent(userId, "budget_alert", {
+        agentId: alert.agentId,
+        level: alert.level,
+        threshold: alert.threshold,
+        prevSpent: alert.prevSpent,
+        newSpent: alert.newSpent,
+        budget: alert.budget,
+        ratio: alert.ratio,
+        triggeredAt: alert.triggeredAt,
+      });
     }
 
     return NextResponse.json(
