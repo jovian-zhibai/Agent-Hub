@@ -93,8 +93,9 @@ const opencodePlugin: Plugin = {
       try {
         const { reporter } = getSDK();
 
+        // 即时上报，不等待批量窗口
         reporter
-          .reportEvent({
+          .reportImmediately({
             type: "tool_call",
             agentId: sdkConfig?.agentId ?? "",
             payload: {
@@ -115,7 +116,7 @@ const opencodePlugin: Plugin = {
      * Hook 3：llm.completion — Token 用量上报
      *
      * 在 LLM 完成一次生成后触发。
-     * 异步上报 token 用量，不阻塞。
+     * 即时上报 Token 用量，不等待批量窗口。
      */
     "llm.completion": (
       _input: { prompt: string; promptTokens?: number; completionTokens?: number; model?: string },
@@ -126,8 +127,9 @@ const opencodePlugin: Plugin = {
         const promptTokens = _input.promptTokens ?? 0;
         const completionTokens = _input.completionTokens ?? 0;
 
+        // 即时上报，不等待批量窗口
         reporter
-          .reportEvent({
+          .reportImmediately({
             type: "token_usage",
             agentId: sdkConfig?.agentId ?? "",
             payload: {

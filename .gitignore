@@ -69,3 +69,6 @@ logs/
 .tsbuildinfo
 tsconfig.tsbuildinfo
 
+# Agent working files
+.opencode/
+

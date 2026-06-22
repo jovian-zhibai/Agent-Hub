@@ -1,0 +1,11 @@
+{
+  "name": "@agent-hub/sdk",
+  "version": "1.0.0",
+  "description": "Agent Hub SDK — permission checking, telemetry, key management",
+  "type": "module",
+  "main": "./src/plugins/opencode-plugin.ts",
+  "types": "./src/plugins/opencode-plugin.ts",
+  "dependencies": {
+    "@opencode-ai/plugin": "^1.0.0"
+  }
+}

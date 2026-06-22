@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useEffect } from "react";
+import { useState, useEffect, useCallback } from "react";
 import { useParams } from "next/navigation";
 import Link from "next/link";
 import { useAgent, useCostTrend, useCostBreakdown } from "@/lib/hooks";
@@ -276,16 +276,17 @@ function CostBreakdownTab({ agentId }: { agentId: string }) {
 // ── Tab 3: Permissions ─────────────────────────
 
 function PermissionsTab({ agentId }: { agentId: string }) {
-  const [data, setData] = useState<{ permissions: PermissionEntry[]; safetyMode: boolean } | null>(null);
+  const [data, setData] = useState<{ rules: Record<string, string>; safetyMode: boolean } | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const [pendingTools, setPendingTools] = useState<Set<string>>(new Set());
 
-  useEffect(() => {
+  const loadPermissions = useCallback(() => {
     let cancelled = false;
     setLoading(true);
     setError(null);
     agents.getPermissions(agentId).then((res) => {
-      if (!cancelled) setData(res);
+      if (!cancelled) setData(res as unknown as { rules: Record<string, string>; safetyMode: boolean });
     }).catch((err) => {
       if (!cancelled) setError(err instanceof Error ? err.message : "Failed to load permissions");
     }).finally(() => {
@@ -293,6 +294,60 @@ function PermissionsTab({ agentId }: { agentId: string }) {
     });
     return () => { cancelled = true; };
   }, [agentId]);
+
+  useEffect(() => {
+    const cancel = loadPermissions();
+    return cancel;
+  }, [loadPermissions]);
+
+  const togglePermission = async (tool: string) => {
+    if (!data) return;
+    const currentAction = data.rules[tool] || "deny";
+    const newAction = currentAction === "allow" ? "deny" : "allow";
+
+    // Optimistic update
+    setData((prev) => {
+      if (!prev) return prev;
+      return { ...prev, rules: { ...prev.rules, [tool]: newAction } };
+    });
+
+    setPendingTools((prev) => new Set(prev).add(tool));
+
+    try {
+      await agents.updatePermissions(agentId, { rules: { [tool]: newAction } });
+    } catch {
+      // Rollback on failure
+      setData((prev) => {
+        if (!prev) return prev;
+        return { ...prev, rules: { ...prev.rules, [tool]: currentAction } };
+      });
+    } finally {
+      setPendingTools((prev) => {
+        const next = new Set(prev);
+        next.delete(tool);
+        return next;
+      });
+    }
+  };
+
+  const toggleSafetyMode = async () => {
+    if (!data) return;
+    const newSafetyMode = !data.safetyMode;
+
+    setData((prev) => {
+      if (!prev) return prev;
+      return { ...prev, safetyMode: newSafetyMode };
+    });
+
+    try {
+      await agents.updatePermissions(agentId, { safetyMode: newSafetyMode });
+    } catch {
+      setData((prev) => {
+        if (!prev) return prev;
+        return { ...prev, safetyMode: !newSafetyMode };
+      });
+    }
+  };
 
   if (loading) {
     return (
@@ -309,10 +364,7 @@ function PermissionsTab({ agentId }: { agentId: string }) {
   }
 
   const allToolNames = ["edit", "bash", "read", "webfetch", "write"];
-  const permissionMap: Record<string, string> = {};
-  (data?.permissions ?? []).forEach((p) => {
-    permissionMap[p.tool] = p.action;
-  });
+  const rules = data?.rules || {};
 
   return (
     <Card>
@@ -322,30 +374,62 @@ function PermissionsTab({ agentId }: { agentId: string }) {
       <CardContent>
         <div className="space-y-2">
           {allToolNames.map((tool) => {
-            const action = permissionMap[tool] || "deny";
+            const action = rules[tool] || "deny";
+            const isPending = pendingTools.has(tool);
             return (
               <div
                 key={tool}
                 className="flex items-center justify-between rounded-lg border border-slate-800 bg-slate-900/40 px-4 py-3"
               >
                 <span className="text-sm font-medium text-slate-200 capitalize">{tool}</span>
-                <Badge variant={PERMISSION_VARIANTS[action] || "default"} className="capitalize">
-                  {action}
-                </Badge>
+                <button
+                  onClick={() => togglePermission(tool)}
+                  disabled={isPending}
+                  className={cn(
+                    "px-3 py-1 rounded text-xs font-medium transition-colors cursor-pointer border",
+                    action === "allow"
+                      ? "bg-green-600/20 text-green-400 border-green-700/50 hover:bg-green-600/30"
+                      : "bg-red-600/20 text-red-400 border-red-700/50 hover:bg-red-600/30",
+                    isPending && "opacity-50 cursor-not-allowed"
+                  )}
+                >
+                  {isPending ? (
+                    <Loader2 className="h-3 w-3 animate-spin inline" />
+                  ) : action === "allow" ? (
+                    "Allow"
+                  ) : (
+                    "Deny"
+                  )}
+                </button>
               </div>
             );
           })}
         </div>
 
         {data?.safetyMode !== undefined && (
-          <div className="mt-4 flex items-center gap-2 rounded-lg bg-indigo-900/20 border border-indigo-800/40 px-4 py-3">
-            <Shield className="h-4 w-4 text-indigo-400 shrink-0" />
-            <div>
-              <p className="text-xs font-medium text-indigo-300">Safety Mode</p>
-              <p className="text-xs text-slate-400">
-                {data.safetyMode ? "Enabled — agent will ask before executing sensitive operations" : "Disabled"}
-              </p>
+          <div
+            className="mt-4 flex items-center justify-between gap-2 rounded-lg bg-indigo-900/20 border border-indigo-800/40 px-4 py-3 cursor-pointer hover:bg-indigo-900/30 transition-colors"
+            onClick={toggleSafetyMode}
+          >
+            <div className="flex items-center gap-2">
+              <Shield className="h-4 w-4 text-indigo-400 shrink-0" />
+              <div>
+                <p className="text-xs font-medium text-indigo-300">Safety Mode</p>
+                <p className="text-xs text-slate-400">
+                  {data.safetyMode ? "Enabled — agent will ask before executing sensitive operations" : "Disabled"}
+                </p>
+              </div>
             </div>
+            <span
+              className={cn(
+                "px-3 py-1 rounded text-xs font-medium transition-colors",
+                data.safetyMode
+                  ? "bg-green-600/20 text-green-400"
+                  : "bg-slate-700/50 text-slate-400"
+              )}
+            >
+              {data.safetyMode ? "On" : "Off"}
+            </span>
           </div>
         )}
       </CardContent>
@@ -447,8 +531,15 @@ export default function AgentDetailPage() {
   const { data, error, isLoading, mutate } = useAgent(id);
   const [activeTab, setActiveTab] = useState<Tab>("overview");
   const [loadedTabs, setLoadedTabs] = useState<Set<Tab>>(new Set(["overview"]));
+  const [now, setNow] = useState(Date.now());
 
   const agent = data?.agent ?? null;
+
+  // 每秒更新 now，让 "X 秒前" 实时跳动
+  useEffect(() => {
+    const id = setInterval(() => setNow(Date.now()), 1000);
+    return () => clearInterval(id);
+  }, []);
 
   const handleTabChange = (tab: Tab) => {
     setActiveTab(tab);
@@ -544,6 +635,14 @@ export default function AgentDetailPage() {
               </span>
               <span>·</span>
               <span>Created {new Date(agent.createdAt).toLocaleDateString()}</span>
+              {data?.lastUpdated && (
+                <>
+                  <span>·</span>
+                  <span>
+                    更新于 {Math.max(0, Math.floor((now - new Date(data.lastUpdated).getTime()) / 1000))} 秒前
+                  </span>
+                </>
+              )}
             </div>
           </div>
         </div>
@@ -556,12 +655,16 @@ export default function AgentDetailPage() {
           <Toggle
             pressed={agent.enabled}
             onClick={async () => {
+              const newEnabled = !agent.enabled;
+              // Optimistic update
+              mutate({ ...data, agent: { ...agent, enabled: newEnabled } }, false);
               try {
-                // optimistic update
-                // The actual API call would be agents.update(id, { enabled: !agent.enabled })
-                // but since there's no agents.update in the API, we just toggle locally
+                await agents.update(id, { enabled: newEnabled });
+                // Revalidate to get fresh data from server
+                mutate();
               } catch {
-                // revert on error
+                // Rollback on error
+                mutate({ ...data, agent: { ...agent, enabled: agent.enabled } }, false);
               }
             }}
           />

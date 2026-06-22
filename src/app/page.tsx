@@ -1,5 +1,6 @@
 "use client";
 
+import { useState, useEffect } from "react";
 import Link from "next/link";
 import { useDashboard } from "@/lib/hooks";
 import { formatCurrency, formatNumber } from "@/lib/utils";
@@ -8,6 +9,7 @@ import MetricCard from "@/components/dashboard/metric-card";
 import AgentGrid from "@/components/dashboard/agent-grid";
 import CostTrend from "@/components/dashboard/cost-trend";
 import KeyOverview from "@/components/dashboard/key-overview";
+import { ActivityStream } from "@/components/events/activity-stream";
 
 import {
   Bot,
@@ -18,6 +20,18 @@ import {
 
 export default function DashboardPage() {
   const { data, error, isLoading } = useDashboard();
+  const [lastUpdated, setLastUpdated] = useState<Date | null>(null);
+  const [now, setNow] = useState(Date.now());
+
+  useEffect(() => {
+    if (data?.lastUpdated) setLastUpdated(new Date(data.lastUpdated));
+  }, [data?.lastUpdated]);
+
+  // 每秒更新 now，让 "X 秒前" 实时跳动
+  useEffect(() => {
+    const id = setInterval(() => setNow(Date.now()), 1000);
+    return () => clearInterval(id);
+  }, []);
 
   // ── Loading state ──────────────────────────
   if (isLoading && !data) {
@@ -80,7 +94,14 @@ export default function DashboardPage() {
     <div className="space-y-6">
       {/* Page title */}
       <div>
-        <h2 className="text-lg font-semibold text-slate-100">Dashboard</h2>
+        <div className="flex items-center justify-between">
+          <h2 className="text-lg font-semibold text-slate-100">Dashboard</h2>
+          {lastUpdated && (
+            <span className="text-xs text-slate-500">
+              最后更新于 {Math.max(0, Math.floor((now - lastUpdated.getTime()) / 1000))} 秒前
+            </span>
+          )}
+        </div>
         <p className="text-xs text-slate-500 mt-1">
           Overview of your agents, keys, and usage
         </p>
@@ -161,6 +182,11 @@ export default function DashboardPage() {
           Agents ({data?.agentList.length || 0})
         </h3>
         <AgentGrid projects={data?.projects || []} />
+      </div>
+
+      {/* Activity stream */}
+      <div className="rounded-lg border border-slate-800 bg-slate-900/60 backdrop-blur-sm p-5">
+        <ActivityStream maxItems={30} />
       </div>
     </div>
   );

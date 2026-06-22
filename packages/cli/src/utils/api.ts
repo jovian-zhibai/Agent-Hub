@@ -142,7 +142,7 @@ export class ApiClient {
    */
   async registerAgent(
     token: string,
-    agent: { name: string; type: string; machineId: string; projectName: string; projectPath: string },
+    agent: { name: string; type: string; machineId: string; projectName: string; projectPath: string; permissions?: { tool: string; action: string }[] },
   ): Promise<AgentRegistration> {
     const response = await fetch(`${this.baseUrl}/api/v1/agents`, {
       method: "POST",
@@ -157,6 +157,7 @@ export class ApiClient {
         machineId: agent.machineId,
         projectName: agent.projectName,
         projectPath: agent.projectPath,
+        permissions: agent.permissions,
       }),
     });
 
@@ -188,18 +189,37 @@ export class ApiClient {
       scope: string;
     },
   ): Promise<any> {
-    const response = await fetch(`${this.baseUrl}/api/v1/keys`, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        Authorization: `Bearer ${token}`,
-        "User-Agent": "agent-hub-cli/1.0",
-      },
-      body: JSON.stringify(data),
-    });
+    try {
+      const response = await fetch(`${this.baseUrl}/api/v1/keys`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${token}`,
+          "User-Agent": "agent-hub-cli/1.0",
+        },
+        body: JSON.stringify(data),
+      });
 
-    if (!response.ok) return null;
-    return response.json();
+      if (response.ok) return response.json();
+
+      // 404 = endpoint not found (usually wrong API URL)
+      if (response.status === 404) {
+        console.warn(`   ⚠️ Key registration failed: 404 — check API URL (${this.baseUrl}/api/v1/keys)`);
+        return null;
+      }
+
+      // 409 Conflict = Key 已存在，不视为失败
+      if (response.status === 409) {
+        console.log(`   ⏭️ Key already registered, skipping`);
+        return null;
+      }
+
+      console.warn(`   ⚠️ Key registration failed: ${response.status}`);
+      return null;
+    } catch (err) {
+      console.warn(`   ⚠️ Key registration error (network/connection): ${err instanceof Error ? err.message : 'unknown'}`);
+      return null;
+    }
   }
 
   // ── Sync ─────────────────────────────────────
@@ -235,43 +255,42 @@ export class ApiClient {
   // ── Telemetry ────────────────────────────────
 
   /**
-   * Send a heartbeat event.
+   * Send a heartbeat event via the batch telemetry endpoint.
    */
   async sendHeartbeat(
     token: string,
     payload: { agentId: string; timestamp: number },
-  ): Promise<HeartbeatAck> {
-    const response = await fetch(
-      `${this.baseUrl}/api/v1/telemetry/heartbeat`,
-      {
+  ): Promise<void> {
+    const url = `${this.baseUrl}/api/v1/telemetry/batch`;
+    const body = JSON.stringify({
+      events: [{
+        agentId: payload.agentId,
+        eventType: "heartbeat",
+        payload: {
+          status: "running",
+          uptime: process.uptime(),
+          memoryUsage: process.memoryUsage().heapUsed,
+        },
+        timestamp: payload.timestamp,
+      }],
+    });
+
+    try {
+      const response = await fetch(url, {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
           Authorization: `Bearer ${token}`,
           "User-Agent": "agent-hub-cli/1.0",
         },
-        body: JSON.stringify({
-          type: "heartbeat",
-          agentId: payload.agentId,
-          payload: {
-            uptime: process.uptime(),
-            memoryUsage: process.memoryUsage().heapUsed,
-          },
-          timestamp: payload.timestamp,
-        }),
-      },
-    );
-
-    if (!response.ok) {
-      const body = await response.text().catch(() => "");
-      throw new ApiError(
-        `心跳上报失败: ${response.status}`,
-        response.status,
         body,
-      );
+      });
+      if (!response.ok) {
+        // Non-critical — silently swallow
+      }
+    } catch {
+      // Non-critical — silently swallow
     }
-
-    return (await response.json()) as HeartbeatAck;
   }
 }
 

@@ -102,6 +102,7 @@ async function handleConnect(options: {
           machineId,
           projectName: agent.projectName,
           projectPath: agent.projectPath,
+          permissions: agent.permissions,
         });
         registeredAgents.push(agent);
       } catch (err: unknown) {

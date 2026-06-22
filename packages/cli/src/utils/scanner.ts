@@ -9,6 +9,7 @@ import * as path from "node:path";
 import * as os from "node:os";
 import * as process from "node:process";
 import { execSync } from "node:child_process";
+import * as yaml from "js-yaml";
 
 // ──────────────────────────────────────────────
 // Types
@@ -19,7 +20,7 @@ export interface DiscoveredAgent {
   name: string;
   /** File path where the agent was defined */
   sourcePath: string;
-  /** Agent type (e.g. "opencode", "claude", "manual") */
+  /** Agent type (e.g. "opcode", "claude", "manual") */
   type: "opencode" | "claude" | "manual";
   /** Project name (derived from git root or directory name) */
   projectName: string;
@@ -27,6 +28,8 @@ export interface DiscoveredAgent {
   projectPath: string;
   /** Agent-specific metadata */
   metadata: Record<string, string>;
+  /** Permissions extracted from frontmatter tools */
+  permissions?: { tool: string; action: string }[];
 }
 
 export interface ScannerResult {
@@ -213,6 +216,10 @@ async function scanOpenCodeAgentsDir(
       metadata.model = modelLine.replace(/^\*\*Model\*\*\s*:\s*/, "").trim();
     }
 
+    // Extract tools/permissions from frontmatter
+    // Supports both permission: { tool: "allow"/"deny" } and tools: { tool: true/false } formats
+    const permissions = extractPermissions(fm);
+
     agents.push({
       name: agentName,
       sourcePath: path.relative(projectRoot, fullPath),
@@ -220,6 +227,7 @@ async function scanOpenCodeAgentsDir(
       projectName: "",
       projectPath: projectRoot,
       metadata,
+      permissions,
     });
   }
 
@@ -350,16 +358,59 @@ async function findProjectRoot(startPath: string): Promise<string | null> {
 
 /**
  * Extract YAML frontmatter from a markdown file's content.
+ * Uses js-yaml for proper YAML parsing (handles nested structures).
  */
 function parseFrontmatter(content: string): Record<string, any> {
   const match = content.match(/^---\n([\s\S]*?)\n---/);
   if (!match) return {};
-  const fm: Record<string, any> = {};
-  for (const line of match[1].split("\n")) {
-    const kv = line.match(/^(\w+):\s*(.+)/);
-    if (kv) fm[kv[1]] = kv[2].replace(/^["']|["']$/g, "").trim();
+  try {
+    const parsed = yaml.load(match[1]) as Record<string, any>;
+    return parsed || {};
+  } catch {
+    return {};
   }
-  return fm;
+}
+
+/**
+ * Extract permissions from frontmatter.
+ * Supports two formats:
+ *   1. permission: { read: "allow", edit: "deny", ... }
+ *   2. tools: { read: true, edit: false, ... }
+ * priority: permission field > tools field > default deny
+ */
+function extractPermissions(fm: Record<string, any>): Array<{ tool: string; action: string }> {
+  const result: Array<{ tool: string; action: string }> = [];
+  const allTools = ["read", "edit", "write", "bash", "webfetch"];
+
+  // 收集 permission 字段（allow/deny 格式）
+  const permMap: Record<string, string> = {};
+  const permField = fm.permission;
+  if (permField && typeof permField === "object") {
+    for (const [tool, action] of Object.entries(permField)) {
+      if (action === "allow" || action === "deny") {
+        permMap[tool] = action;
+      }
+    }
+  }
+
+  // 收集 tools 字段（true/false 格式）
+  const toolsMap: Record<string, string> = {};
+  const toolsField = fm.tools;
+  if (toolsField && typeof toolsField === "object") {
+    for (const [tool, val] of Object.entries(toolsField)) {
+      if (typeof val === "boolean") {
+        toolsMap[tool] = val ? "allow" : "deny";
+      }
+    }
+  }
+
+  // 合并：permission 优先，tools 补漏，都没找到的默认 deny
+  for (const tool of allTools) {
+    const action = permMap[tool] || toolsMap[tool] || "deny";
+    result.push({ tool, action });
+  }
+
+  return result;
 }
 
 /**

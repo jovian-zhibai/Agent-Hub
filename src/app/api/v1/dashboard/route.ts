@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { prisma } from "@/lib/prisma";
 import { getAuthUser, ApiError } from "@/lib/auth";
+import { loadPricingMap, computeEventCost } from "@/lib/cost";
 
 // ──────────────────────────────────────────────
 // Types
@@ -49,6 +50,7 @@ interface KeyOverviewItem {
 }
 
 interface DashboardResponse {
+  lastUpdated: string;
   metrics: DashboardMetrics;
   agentList: AgentListItem[];
   projects: { projectName: string; agents: AgentListItem[] }[];
@@ -215,41 +217,13 @@ orderBy: [{ projectName: "asc" }, { createdAt: "desc" }],
     const keyCount = keyCounts.reduce((sum, r) => sum + r._count.id, 0);
 
     // ── Load models pricing ───────────────────
-    const allModels = await prisma.model.findMany({
-      where: { isActive: true },
-      select: {
-        modelName: true,
-        displayName: true,
-        pricingInput: true,
-        pricingOutput: true,
-      },
-    });
-    const pricingMap = new Map<
-      string,
-      { displayName: string; pricingInput: number; pricingOutput: number }
-    >();
-    for (const m of allModels) {
-      if (!pricingMap.has(m.modelName)) {
-        pricingMap.set(m.modelName, {
-          displayName: m.displayName,
-          pricingInput: Number(m.pricingInput),
-          pricingOutput: Number(m.pricingOutput),
-        });
-      }
-    }
+    const pricingMap = await loadPricingMap(prisma, { includeDisplayName: true });
 
     // ── Calculate monthly cost ────────────────
     let totalCostThisMonth = 0;
     for (const event of monthlyCostEvents) {
-      const payload = event.payload as TokenUsagePayload;
-      const model = payload.model ?? "unknown";
-      const tokensIn = (payload.tokensIn as number) || (payload.promptTokens as number) || 0;
-      const tokensOut = (payload.tokensOut as number) || (payload.completionTokens as number) || 0;
-      const pricing = pricingMap.get(model);
-      if (pricing) {
-        totalCostThisMonth +=
-          (tokensIn * pricing.pricingInput + tokensOut * pricing.pricingOutput) / 1_000_000;
-      }
+      const { cost } = computeEventCost(event.payload as Record<string, unknown>, pricingMap);
+      totalCostThisMonth += cost;
     }
 
     // ── Build agent list ──────────────────────
@@ -312,16 +286,8 @@ orderBy: [{ projectName: "asc" }, { createdAt: "desc" }],
     // ── Build cost trend (last 7 days) ────────
     const dayMap = new Map<string, number>();
     for (const event of costTrendEvents) {
-      const payload = event.payload as TokenUsagePayload;
       const day = dateKey(event.reportedAt);
-      const model = payload.model ?? "unknown";
-      const tokensIn = (payload.tokensIn as number) || (payload.promptTokens as number) || 0;
-      const tokensOut = (payload.tokensOut as number) || (payload.completionTokens as number) || 0;
-      const pricing = pricingMap.get(model);
-      let cost = 0;
-      if (pricing) {
-        cost = (tokensIn * pricing.pricingInput + tokensOut * pricing.pricingOutput) / 1_000_000;
-      }
+      const { cost } = computeEventCost(event.payload as Record<string, unknown>, pricingMap);
       dayMap.set(day, (dayMap.get(day) ?? 0) + cost);
     }
 
@@ -355,6 +321,7 @@ orderBy: [{ projectName: "asc" }, { createdAt: "desc" }],
 
     // ── Compose response ──────────────────────
     const response: DashboardResponse = {
+      lastUpdated: new Date().toISOString(),
       metrics: {
         agentCount,
         agentRunning,

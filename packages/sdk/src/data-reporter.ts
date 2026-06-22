@@ -47,6 +47,15 @@ const MAX_RETRIES = 3;
 const OFFLINE_CACHE_KEY = "telemetry-offline";
 const MAX_OFFLINE_EVENTS = 5_000;
 
+/**
+ * Generate a deterministic event ID for idempotent ingestion.
+ */
+function generateEventId(event: TelemetryEvent): string {
+  const tool = String(event.payload?.tool || "unknown");
+  const model = String(event.payload?.model || "unknown");
+  return `${event.agentId}::${event.timestamp}::${event.type}::${tool}::${model}`;
+}
+
 // ──────────────────────────────────────────────
 // DataReporter
 // ──────────────────────────────────────────────
@@ -58,6 +67,7 @@ export class DataReporter {
   private heartbeatTimer: ReturnType<typeof setInterval> | null = null;
   private running = false;
   private cache: LocalCache;
+  private sending = false; // B7: Prevent interleaving between reportImmediately and reportBatch
 
   constructor(config: DataReporterConfig) {
     this.config = config;
@@ -77,11 +87,61 @@ export class DataReporter {
       this.buffer.shift();
     }
 
+    // B7: Attach deterministic eventId for idempotent ingestion
+    (event as any).eventId = generateEventId(event);
+
     this.buffer.push(event);
 
     // If not running, try to flush immediately (one-shot mode)
     if (!this.running) {
       await this.reportBatch();
+    }
+  }
+
+  /**
+   * 即时上报单条事件，不放缓冲区，不等待批量窗口。
+   * 用于 Agent 调用结束等需要立即展示的场景。
+   * 失败时 fallback 到缓冲区，等待批量发送兜底。
+   */
+  async reportImmediately(event: TelemetryEvent): Promise<void> {
+    // B7: Attach deterministic eventId
+    const eventWithId = { ...event, eventId: generateEventId(event) } as TelemetryEvent & { eventId: string };
+
+    // B7: If a batch send is in progress, don't start a concurrent send
+    if (this.sending) {
+      this.buffer.push(eventWithId);
+      return;
+    }
+
+    try {
+      this.sending = true;
+      const body = JSON.stringify({
+        events: [{
+          ...eventWithId,
+          timestamp: eventWithId.timestamp || Date.now(),
+        }]
+      });
+
+      const response = await fetch(`${this.config.apiBaseUrl}/api/v1/telemetry/batch`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${this.getBearerToken()}`,
+        },
+        body,
+      });
+
+      if (!response.ok) {
+        // Fallback：立即上报失败，丢进缓冲区等批量发
+        this.buffer.push(eventWithId);
+        console.warn("[AgentHub] Immediate report failed, queued for batch");
+      }
+    } catch (err) {
+      // 网络错误也丢进缓冲区
+      this.buffer.push(eventWithId);
+      console.warn("[AgentHub] Immediate report error, queued for batch:", err);
+    } finally {
+      this.sending = false;
     }
   }
 
@@ -94,27 +154,37 @@ export class DataReporter {
       return;
     }
 
-    const batch = this.buffer.splice(0, this.buffer.length);
-    let lastError: Error | null = null;
-
-    for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
-      try {
-        await this.sendBatch(batch);
-        return; // Success — done
-      } catch (err: unknown) {
-        lastError = err instanceof Error ? err : new Error(String(err));
-
-        if (attempt < MAX_RETRIES) {
-          // Exponential backoff: 1s, 3s, 9s
-          const delayMs = RETRY_DELAYS_MS[Math.min(attempt, RETRY_DELAYS_MS.length - 1)];
-          await this.sleep(delayMs);
-        }
-      }
+    // B7: Prevent concurrent sends
+    if (this.sending) {
+      return;
     }
 
-    // All retries exhausted — stash to offline cache
-    if (lastError) {
-      await this.cacheToOffline(batch);
+    this.sending = true;
+    try {
+      const batch = this.buffer.splice(0, this.buffer.length);
+      let lastError: Error | null = null;
+
+      for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
+        try {
+          await this.sendBatch(batch);
+          return; // Success — done
+        } catch (err: unknown) {
+          lastError = err instanceof Error ? err : new Error(String(err));
+
+          if (attempt < MAX_RETRIES) {
+            // Exponential backoff: 1s, 3s, 9s
+            const delayMs = RETRY_DELAYS_MS[Math.min(attempt, RETRY_DELAYS_MS.length - 1)];
+            await this.sleep(delayMs);
+          }
+        }
+      }
+
+      // All retries exhausted — stash to offline cache
+      if (lastError) {
+        await this.cacheToOffline(batch);
+      }
+    } finally {
+      this.sending = false;
     }
   }
 
@@ -212,7 +282,7 @@ export class DataReporter {
   }
 
   /**
-   * Send a heartbeat event.
+   * Send a heartbeat event via the batch telemetry endpoint.
    */
   private async sendHeartbeat(): Promise<void> {
     const event: TelemetryEvent = {
@@ -226,9 +296,8 @@ export class DataReporter {
       timestamp: Date.now(),
     };
 
-    // Heartbeats are sent immediately, not batched
     try {
-      const url = `${this.config.apiBaseUrl}/api/v1/telemetry/heartbeat`;
+      const url = `${this.config.apiBaseUrl}/api/v1/telemetry/batch`;
 
       const response = await fetch(url, {
         method: "POST",
@@ -237,7 +306,11 @@ export class DataReporter {
           Authorization: `Bearer ${this.getBearerToken()}`,
           "User-Agent": "agent-hub-sdk/1.0",
         },
-        body: JSON.stringify(event),
+        body: JSON.stringify({
+          events: [event],
+          agentId: this.config.agentId,
+          sentAt: Date.now(),
+        }),
       });
 
       if (!response.ok) {

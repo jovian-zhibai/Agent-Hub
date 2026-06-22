@@ -15,6 +15,7 @@ interface CostTrendItem {
 interface CostTrendResponse {
   trend: CostTrendItem[];
   total: number;
+  lastUpdated: string;
 }
 
 interface TokenUsagePayload {
@@ -102,9 +103,9 @@ export async function GET(
     });
 
     if (usageEvents.length === 0) {
-      return NextResponse.json(
-        { trend: [], total: 0 } satisfies CostTrendResponse,
-        { status: 200 }
+    return NextResponse.json(
+      { trend: [], total: 0, lastUpdated: new Date().toISOString() } satisfies CostTrendResponse,
+      { status: 200 }
       );
     }
 
@@ -162,7 +163,7 @@ export async function GET(
     const total = trend.reduce((sum, item) => sum + item.cost, 0);
 
     return NextResponse.json(
-      { trend, total: Math.round(total * 1000000) / 1000000 } satisfies CostTrendResponse,
+      { trend, total: Math.round(total * 1000000) / 1000000, lastUpdated: new Date().toISOString() } satisfies CostTrendResponse,
       { status: 200 }
     );
   } catch (error) {

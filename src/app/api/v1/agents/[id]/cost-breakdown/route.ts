@@ -19,6 +19,7 @@ interface CostBreakdownItem {
 interface CostBreakdownResponse {
   breakdown: CostBreakdownItem[];
   total: number;
+  lastUpdated: string;
 }
 
 interface TokenUsagePayload {
@@ -90,7 +91,7 @@ export async function GET(
 
     if (usageEvents.length === 0) {
       return NextResponse.json(
-        { breakdown: [], total: 0 } satisfies CostBreakdownResponse,
+        { breakdown: [], total: 0, lastUpdated: new Date().toISOString() } satisfies CostBreakdownResponse,
         { status: 200 }
       );
     }
@@ -174,6 +175,7 @@ export async function GET(
       {
         breakdown,
         total: Math.round(totalCost * 1000000) / 1000000,
+        lastUpdated: new Date().toISOString(),
       } satisfies CostBreakdownResponse,
       { status: 200 }
     );

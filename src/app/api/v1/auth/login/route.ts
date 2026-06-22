@@ -1,4 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
+import bcrypt from "bcryptjs";
 import { prisma } from "@/lib/prisma";
 import { verifyPassword, generateTokens, generateAgentToken, ApiError } from "@/lib/auth";
 import { rateLimit, RateLimitPresets } from "@/lib/rate-limit";
@@ -41,10 +42,15 @@ export async function POST(request: NextRequest) {
         email: true,
         name: true,
         passwordHash: true,
+        tokenVersion: true,
       },
     });
 
+    // C6: Constant-time check — always run bcrypt even if user doesn't exist
+    // to prevent user enumeration via timing attacks
+    const DUMMY_HASH = "$2b$12$LJ3m4ys3Lk0TSwHlLkMkY.5P6Q7R8S9T0U1V2W3X4Y5Z6a7b8c9d0e";
     if (!account) {
+      await bcrypt.compare("dummy-constant-time-check", DUMMY_HASH);
       return NextResponse.json(
         { code: "INVALID_CREDENTIALS", message: "Invalid email or password" },
         { status: 401 }
@@ -64,14 +70,18 @@ export async function POST(request: NextRequest) {
     const { accessToken, refreshToken } = generateTokens({
       userId: account.id,
       email: account.email,
+      type: "access",
+      tokenVersion: account.tokenVersion,
     });
     const agentToken = generateAgentToken(account.id);
+    const expiresAt = Date.now() + 2 * 60 * 60 * 1000; // 2小时后
 
-    return NextResponse.json(
+    // C7: Store refresh token as HttpOnly cookie, not in response body
+    const response = NextResponse.json(
       {
         accessToken,
-        refreshToken,
         agentToken,
+        expiresAt,
         user: {
           id: account.id,
           email: account.email,
@@ -80,6 +90,16 @@ export async function POST(request: NextRequest) {
       },
       { status: 200 }
     );
+
+    response.cookies.set("refresh_token", refreshToken, {
+      httpOnly: true,
+      secure: process.env.NODE_ENV === "production",
+      sameSite: "strict",
+      path: "/api/v1/auth",
+      maxAge: 30 * 24 * 60 * 60, // 30 天
+    });
+
+    return response;
   } catch (error) {
     if (error instanceof ApiError) {
       return NextResponse.json(

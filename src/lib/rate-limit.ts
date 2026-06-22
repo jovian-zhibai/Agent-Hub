@@ -1,14 +1,16 @@
 // ──────────────────────────────────────────────
 // Rate Limiting Middleware
 // Prevent API abuse with configurable rate limits
+// C3: Use userId for authenticated requests, not JWT prefix
+// C3: Don't trust X-Forwarded-For (unless PROXY_TRUSTED is set)
+// C3: Add Redis backend interface with in-memory fallback
+// C3: Periodic cleanup of expired entries
 // ──────────────────────────────────────────────
 
 import { NextRequest, NextResponse } from "next/server";
+import jwt from "jsonwebtoken";
 
-/**
- * Simple in-memory rate limiter.
- * For production, consider using Redis or a dedicated service.
- */
+// ── Rate Limit Configuration ──────────────────
 
 interface RateLimitConfig {
   /** Maximum requests per window */
@@ -26,27 +28,103 @@ interface RateLimitEntry {
   resetTime: number;
 }
 
-// In-memory store (use Redis in production)
-const requestCounts = new Map<string, RateLimitEntry>();
+// ── Storage Backend Interface (C3) ────────────
+
+interface RateLimitStore {
+  get(key: string): Promise<RateLimitEntry | undefined>;
+  set(key: string, entry: RateLimitEntry): Promise<void>;
+  delete(key: string): Promise<void>;
+  cleanup(): Promise<void>;
+  clear(): Promise<void>;
+}
+
+// ── In-memory store (default) ─────────────────
+
+class InMemoryStore implements RateLimitStore {
+  private store = new Map<string, RateLimitEntry>();
+
+  async get(key: string): Promise<RateLimitEntry | undefined> {
+    return this.store.get(key);
+  }
+
+  async set(key: string, entry: RateLimitEntry): Promise<void> {
+    this.store.set(key, entry);
+  }
+
+  async delete(key: string): Promise<void> {
+    this.store.delete(key);
+  }
+
+  async cleanup(): Promise<void> {
+    const now = Date.now();
+    const keysToDelete: string[] = [];
+    for (const [key, entry] of this.store.entries()) {
+      if (now > entry.resetTime) {
+        keysToDelete.push(key);
+      }
+    }
+    for (const key of keysToDelete) {
+      this.store.delete(key);
+    }
+  }
+
+  async clear(): Promise<void> {
+    this.store.clear();
+  }
+}
+
+// ── Redis-backed store (future, interface only) ─
+// To activate: set RATE_LIMIT_DRIVER=redis and configure REDIS_URL
+// class RedisStore implements RateLimitStore {
+//   constructor(private redis: any) {}
+//   async get(key: string): Promise<RateLimitEntry | undefined> { ... }
+//   async set(key: string, entry: RateLimitEntry): Promise<void> { ... }
+//   async delete(key: string): Promise<void> { ... }
+//   async cleanup(): Promise<void> { ... }
+// }
+
+// Select store backend
+let store: RateLimitStore = new InMemoryStore();
+if (process.env.RATE_LIMIT_DRIVER === "redis" && process.env.REDIS_URL) {
+  // Production Redis support — uncomment when Redis is available
+  // const redis = new Redis(process.env.REDIS_URL);
+  // store = new RedisStore(redis);
+}
 
 /**
  * Get client identifier from request.
- * Uses IP address or Authorization token.
+ * C3: Use userId if authenticated, fall back to IP.
+ * C3: Don't trust X-Forwarded-For unless PROXY_TRUSTED is explicitly set.
  */
 function getClientId(request: NextRequest): string {
-  // Try to get IP from headers (handle proxies)
-  const forwarded = request.headers.get("x-forwarded-for");
-  const realIp = request.headers.get("x-real-ip");
-  const ip = forwarded?.split(",")[0] || realIp || "unknown";
-
-  // Use auth token if available (for authenticated requests)
+  // Use authenticated userId when available (C3: stable per-user identifier)
   const authHeader = request.headers.get("authorization");
   if (authHeader?.startsWith("Bearer ")) {
-    const token = authHeader.substring(7);
-    return `token:${token.slice(0, 10)}`;
+    try {
+      const rawSecret = process.env.JWT_SECRET;
+      if (rawSecret) {
+        const decoded = jwt.verify(authHeader.slice(7), rawSecret, {
+          algorithms: ["HS256"],
+        }) as { userId?: string };
+        if (decoded.userId) {
+          return `user:${decoded.userId}`;
+        }
+      }
+    } catch {
+      // Token decode failed — fall through to IP
+    }
   }
 
-  return `ip:${ip}`;
+  // C3: Only trust X-Forwarded-For if PROXY_TRUSTED environment variable is set
+  if (process.env.PROXY_TRUSTED === "true") {
+    const forwarded = request.headers.get("x-forwarded-for");
+    const realIp = request.headers.get("x-real-ip");
+    const ip = forwarded?.split(",")[0] || realIp || "unknown";
+    return `ip:${ip}`;
+  }
+
+  // Direct connection: use x-real-ip or fallback
+  return `ip:${request.headers.get("x-real-ip") || "direct"}`;
 }
 
 /**
@@ -54,20 +132,6 @@ function getClientId(request: NextRequest): string {
  * 
  * @param config - Rate limit configuration
  * @returns Middleware function
- * 
- * @example
- * ```typescript
- * export async function POST(request: NextRequest) {
- *   const rateLimitResult = await rateLimit({
- *     max: 10,
- *     windowMs: 60 * 1000, // 1 minute
- *   })(request);
- *   
- *   if (rateLimitResult) return rateLimitResult;
- *   
- *   // Handle request...
- * }
- * ```
  */
 export function rateLimit(config: RateLimitConfig) {
   const {
@@ -87,7 +151,7 @@ export function rateLimit(config: RateLimitConfig) {
     const now = Date.now();
 
     // Get or create rate limit entry
-    let entry = requestCounts.get(clientId);
+    let entry = await store.get(clientId);
 
     // Reset if window expired
     if (!entry || now > entry.resetTime) {
@@ -99,7 +163,7 @@ export function rateLimit(config: RateLimitConfig) {
 
     // Increment count
     entry.count++;
-    requestCounts.set(clientId, entry);
+    await store.set(clientId, entry);
 
     // Calculate retry after
     const retryAfter = Math.ceil((entry.resetTime - now) / 1000);
@@ -125,7 +189,7 @@ export function rateLimit(config: RateLimitConfig) {
       );
     }
 
-    // Allow request (headers will be added by the caller if needed)
+    // Allow request
     return null;
   };
 }
@@ -134,24 +198,17 @@ export function rateLimit(config: RateLimitConfig) {
  * Clean up expired entries periodically.
  * Call this in a background job or cron.
  */
-export function cleanupRateLimitStore(): void {
-  const now = Date.now();
-  const keysToDelete: string[] = [];
-  
-  for (const [key, entry] of requestCounts.entries()) {
-    if (now > entry.resetTime) {
-      keysToDelete.push(key);
-    }
-  }
-  
-  keysToDelete.forEach(key => requestCounts.delete(key));
+export async function cleanupRateLimitStore(): Promise<void> {
+  await store.cleanup();
 }
 
 /**
  * Clear all rate limit entries (for testing).
  */
-export function clearRateLimitStore(): void {
-  requestCounts.clear();
+export async function clearRateLimitStore(): Promise<void> {
+  if (store instanceof InMemoryStore) {
+    await store.clear();
+  }
 }
 
 /**
@@ -188,17 +245,6 @@ export const RateLimitPresets = {
 
 /**
  * Helper to create a rate-limited API handler.
- * 
- * @example
- * ```typescript
- * export const POST = createRateLimitedHandler(
- *   RateLimitPresets.strict,
- *   async (request: NextRequest) => {
- *     // Handle request...
- *     return NextResponse.json({ success: true });
- *   }
- * );
- * ```
  */
 export function createRateLimitedHandler(
   config: RateLimitConfig,
@@ -221,7 +267,7 @@ export function createRateLimitedHandler(
  * Call this once when the application starts.
  */
 export function startRateLimitCleanup(intervalMs = 5 * 60 * 1000): NodeJS.Timeout {
-  return setInterval(() => {
-    cleanupRateLimitStore();
+  return setInterval(async () => {
+    await cleanupRateLimitStore();
   }, intervalMs);
 }

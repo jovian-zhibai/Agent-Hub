@@ -48,8 +48,8 @@ export async function GET(
     const logs = failoverLogs.map((fl) => ({
       id: fl.id,
       timestamp: fl.triggeredAt.toISOString(),
-      fromKey: fl.fromKey.keyLabel,
-      toKey: fl.toKey.keyLabel,
+      fromKey: fl.fromKey?.keyLabel ?? null,
+      toKey: fl.toKey?.keyLabel ?? null,
       reason: fl.reason,
     }));
 

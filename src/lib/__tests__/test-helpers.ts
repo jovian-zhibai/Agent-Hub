@@ -29,7 +29,11 @@ export function createMockRequest(
   const headers = new Headers(options?.headers || {});
   headers.set("content-type", "application/json");
 
-  const init: any = {
+  const init: {
+    method: string;
+    headers: Headers;
+    body?: string;
+  } = {
     method,
     headers,
   };
@@ -38,7 +42,7 @@ export function createMockRequest(
     init.body = JSON.stringify(options.body);
   }
 
-  return new NextRequest(fullUrl, init);
+  return new NextRequest(fullUrl, init as RequestInit & { signal?: AbortSignal });
 }
 
 /**
@@ -68,7 +72,7 @@ export function createAuthenticatedRequest(
 /**
  * Extract JSON body from NextResponse.
  */
-export async function getResponseBody<T = any>(response: Response): Promise<T | null> {
+export async function getResponseBody<T = unknown>(response: Response): Promise<T | null> {
   const text = await response.text();
   return text ? JSON.parse(text) : null;
 }
@@ -76,7 +80,7 @@ export async function getResponseBody<T = any>(response: Response): Promise<T | 
 /**
  * Assert response status and return parsed body.
  */
-export async function expectResponse<T = any>(
+export async function expectResponse<T = unknown>(
   response: Response,
   expectedStatus: number
 ): Promise<T | null> {
@@ -108,7 +112,7 @@ export function mockEnv(vars: Record<string, string>): () => void {
 /**
  * Generate a test JWT token (for testing only).
  */
-export function generateTestToken(payload: Record<string, any>): string {
+export function generateTestToken(payload: Record<string, unknown>): string {
   // Simple base64 encoding for testing (NOT secure, only for tests)
   const header = Buffer.from(JSON.stringify({ alg: "HS256", typ: "JWT" })).toString("base64");
   const body = Buffer.from(JSON.stringify(payload)).toString("base64");

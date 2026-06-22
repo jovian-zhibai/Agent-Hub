@@ -81,10 +81,14 @@ export async function POST(request: NextRequest) {
     const { accessToken, refreshToken } = generateTokens({
       userId: account.id,
       email: account.email,
+      type: "access",
+      tokenVersion: 0, // New account starts at version 0
     });
     const agentToken = generateAgentToken(account.id);
+    const expiresAt = Date.now() + 2 * 60 * 60 * 1000; // 2小时后
 
-    return NextResponse.json(
+    // Store refresh token as HttpOnly cookie
+    const response = NextResponse.json(
       {
         user: {
           id: account.id,
@@ -92,11 +96,21 @@ export async function POST(request: NextRequest) {
           name: account.name,
         },
         accessToken,
-        refreshToken,
         agentToken,
+        expiresAt,
       },
       { status: 201 }
     );
+
+    response.cookies.set("refresh_token", refreshToken, {
+      httpOnly: true,
+      secure: process.env.NODE_ENV === "production",
+      sameSite: "strict",
+      path: "/api/v1/auth",
+      maxAge: 30 * 24 * 60 * 60, // 30 天
+    });
+
+    return response;
   } catch (error) {
     if (error instanceof ApiError) {
       return NextResponse.json(

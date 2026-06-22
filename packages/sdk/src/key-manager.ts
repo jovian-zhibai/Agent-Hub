@@ -50,6 +50,7 @@ export class KeyManager {
   constructor(
     private cache: LocalCache,
     private reporter?: DataReporter,
+    private agentId?: string, // B8: Store agentId for failover event reporting
   ) {}
 
   // ── Public API ───────────────────────────────
@@ -256,6 +257,7 @@ export class KeyManager {
    * Report a key-related event.
    *
    * P0 Bug 2 fix: type comes from the parameter, not hardcoded "heartbeat".
+   * B8 fix: pass real agentId instead of empty string.
    */
   private async reportEvent(params: {
     type: TelemetryEvent["type"];
@@ -267,7 +269,7 @@ export class KeyManager {
     try {
       await this.reporter.reportEvent({
         type: params.type,
-        agentId: "",
+        agentId: this.agentId || "",
         keyId: params.keyId,
         payload: params.payload,
         timestamp: Date.now(),

@@ -79,7 +79,7 @@ export async function GET(request: NextRequest) {
       createdAt: key.createdAt.toISOString(),
     }));
 
-    return NextResponse.json({ keys: result, total: result.length }, { status: 200 });
+    return NextResponse.json({ keys: result, total: result.length, lastUpdated: new Date().toISOString() }, { status: 200 });
   } catch (error) {
     if (error instanceof ApiError) {
       return NextResponse.json(
@@ -106,20 +106,20 @@ export async function POST(request: NextRequest) {
     const user = await getAuthUser(request);
 
     const body = await request.json();
+    // ── Field aliasing for frontend compatibility ──
+    // Frontend sends `provider` (name) instead of `providerId`; `keyValue` instead of `keyEncrypted`; `label` instead of `keyLabel`
+    const providerId = body.providerId || body.provider;
+    const keyEncrypted = body.keyEncrypted || body.keyValue;
+    const keyLabel = body.keyLabel || body.label;
+
     const {
-      providerId,
       protocol,
-      keyLabel,
-      keyEncrypted,
       scope,
       group,
       note,
       initialBalance,
     } = body as {
-      providerId?: string;
       protocol?: string;
-      keyLabel?: string;
-      keyEncrypted?: string;
       scope?: string;
       group?: string;
       note?: string;
@@ -129,16 +129,24 @@ export async function POST(request: NextRequest) {
     // ── Validate required fields ────────────
     if (!providerId || !protocol || !keyLabel || !keyEncrypted) {
       return NextResponse.json(
-        { code: "VALIDATION_ERROR", message: "providerId, protocol, keyLabel, and keyEncrypted are required" },
+        { code: "VALIDATION_ERROR", message: "providerId (or provider), protocol, keyLabel (or label), and keyEncrypted (or keyValue) are required" },
         { status: 400 }
       );
     }
 
     // ── Verify provider exists ──────────────
-    const provider = await prisma.provider.findUnique({
-      where: { name: providerId },
+    // `providerId` may be a UUID or a provider name — try both
+    let provider = await prisma.provider.findUnique({
+      where: { id: providerId },
       select: { id: true },
     });
+
+    if (!provider) {
+      provider = await prisma.provider.findFirst({
+        where: { name: { equals: providerId, mode: "insensitive" } },
+        select: { id: true },
+      });
+    }
 
     if (!provider) {
       return NextResponse.json(
@@ -150,6 +158,18 @@ export async function POST(request: NextRequest) {
     // ── Encrypt key with AES-256-GCM ─────────
     const encryptedValue = encryptKey(keyEncrypted);
     const keyPrefix = extractKeyPrefix(keyEncrypted);
+
+    // ── Check for duplicate key label ─────────
+    const existing = await prisma.key.findFirst({
+      where: { accountId: user.id, keyLabel },
+      select: { id: true },
+    });
+    if (existing) {
+      return NextResponse.json(
+        { code: "DUPLICATE", message: "Key already exists" },
+        { status: 409 },
+      );
+    }
 
     // ── Create key ──────────────────────────
     const key = await prisma.key.create({

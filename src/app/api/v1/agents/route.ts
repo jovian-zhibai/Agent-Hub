@@ -118,7 +118,7 @@ export async function GET(request: NextRequest) {
     }));
 
     return NextResponse.json(
-      { agents: result, projects, total: result.length },
+      { agents: result, projects, total: result.length, lastUpdated: new Date().toISOString() },
       { status: 200 }
     );
   } catch (error) {
@@ -164,15 +164,19 @@ export async function POST(request: NextRequest) {
 
     let agent;
     if (existing) {
+      // B13: Don't overwrite status, enabled, or other admin-managed fields
+      const updateData: Record<string, any> = {};
+      if (body.machineId !== undefined) {
+        updateData.machineId = body.machineId;
+      } else if (existing.machineId) {
+        updateData.machineId = existing.machineId;
+      }
+      updateData.projectName = projectName || existing.projectName;
+      updateData.projectPath = projectPath || existing.projectPath;
+
       agent = await prisma.agent.update({
         where: { id: existing.id },
-        data: {
-          status: "running",
-          machineId: body.machineId ?? null,
-          enabled: true,
-          projectName: projectName || existing.projectName,
-          projectPath: projectPath || existing.projectPath,
-        },
+        data: updateData,
       });
     } else {
       agent = await prisma.agent.create({
@@ -186,6 +190,19 @@ export async function POST(request: NextRequest) {
           projectName: projectName,
           projectPath: projectPath,
         },
+      });
+    }
+
+    // ── Persist permissions if provided (connect sync) ──
+    if (body.permissions && Array.isArray(body.permissions)) {
+      const rules: Record<string, string> = {};
+      for (const p of body.permissions) {
+        rules[p.tool] = p.action;
+      }
+      await prisma.permission.upsert({
+        where: { agentId: agent.id },
+        update: { rules: rules as any, version: { increment: 1 } },
+        create: { agentId: agent.id, rules: rules as any, version: 1 },
       });
     }
 

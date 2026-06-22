@@ -5,8 +5,8 @@ import { fetcher } from "./api";
 
 export function useDashboard() {
   return useSWR("/v1/dashboard", fetcher, {
-    refreshInterval: 60000,    // 60 秒轮询
-    revalidateOnFocus: true,   // 页面 focus 时刷新
+    refreshInterval: 5000,     // 5秒轮询
+    revalidateOnFocus: true,
   });
 }
 
@@ -14,28 +14,28 @@ export function useDashboard() {
 
 export function useAgents() {
   return useSWR("/v1/agents", fetcher, {
-    refreshInterval: 60000,
+    refreshInterval: 5000,
     revalidateOnFocus: true,
   });
 }
 
 export function useAgent(id: string) {
   return useSWR(id ? `/v1/agents/${id}` : null, fetcher, {
-    refreshInterval: 30000,   // Agent 详情 30 秒轮询
+    refreshInterval: 5000,    // 5秒轮询
     revalidateOnFocus: true,
   });
 }
 
 export function useCostTrend(agentId: string, range = "7d") {
   return useSWR(`/v1/agents/${agentId}/cost-trend?range=${range}`, fetcher, {
-    refreshInterval: 60000,
+    refreshInterval: 5000,
     revalidateOnFocus: true,
   });
 }
 
 export function useCostBreakdown(agentId: string, range = "7d") {
   return useSWR(`/v1/agents/${agentId}/cost-breakdown?range=${range}`, fetcher, {
-    refreshInterval: 60000,
+    refreshInterval: 5000,
     revalidateOnFocus: true,
   });
 }
@@ -44,14 +44,14 @@ export function useCostBreakdown(agentId: string, range = "7d") {
 
 export function useKeys(params?: string) {
   return useSWR(`/v1/keys${params ? `?${params}` : ""}`, fetcher, {
-    refreshInterval: 30000,
+    refreshInterval: 10000,   // Key 列表 10 秒
     revalidateOnFocus: true,
   });
 }
 
 export function useKeyUsage(keyId: string, range = "7d") {
   return useSWR(keyId ? `/v1/keys/${keyId}/usage?range=${range}` : null, fetcher, {
-    refreshInterval: 60000,
+    refreshInterval: 10000,
     revalidateOnFocus: true,
   });
 }

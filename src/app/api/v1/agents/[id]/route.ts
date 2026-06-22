@@ -202,6 +202,7 @@ export async function GET(
           successRate: Math.round(successRate * 10000) / 10000,
         },
         model,
+        lastUpdated: new Date().toISOString(),
       },
       { status: 200 }
     );
@@ -214,6 +215,70 @@ export async function GET(
     }
 
     console.error("[agents/id] Unexpected error:", error);
+    return NextResponse.json(
+      { code: "INTERNAL_ERROR", message: "Internal server error" },
+      { status: 500 }
+    );
+  }
+}
+
+// ──────────────────────────────────────────────
+// PATCH /api/v1/agents/:id
+// Update agent fields (enabled, status, name, etc.)
+// ──────────────────────────────────────────────
+
+export async function PATCH(
+  request: NextRequest,
+  { params }: { params: Promise<{ id: string }> }
+) {
+  try {
+    const user = await getAuthUser(request);
+    const { id } = await params;
+    const body = await request.json();
+
+    // Verify agent exists and belongs to current user
+    const agent = await prisma.agent.findUnique({ where: { id } });
+    if (!agent) {
+      return NextResponse.json(
+        { code: "NOT_FOUND", message: "Agent not found" },
+        { status: 404 }
+      );
+    }
+    if (agent.accountId !== user.id) {
+      return NextResponse.json(
+        { code: "FORBIDDEN", message: "Access denied" },
+        { status: 403 }
+      );
+    }
+
+    // Only allow updating specific fields
+    const updateData: Record<string, unknown> = {};
+    if (typeof body.enabled === "boolean") updateData.enabled = body.enabled;
+    if (body.status) updateData.status = body.status;
+    if (typeof body.safetyMode === "boolean") updateData.safetyMode = body.safetyMode;
+    if (body.name) updateData.name = body.name;
+    if (body.description !== undefined) updateData.description = body.description;
+    if (body.monthlyBudget !== undefined) updateData.monthlyBudget = body.monthlyBudget;
+
+    const updated = await prisma.agent.update({
+      where: { id },
+      data: updateData,
+    });
+
+    return NextResponse.json({
+      id: updated.id,
+      enabled: updated.enabled,
+      status: updated.status,
+    });
+  } catch (error) {
+    if (error instanceof ApiError) {
+      return NextResponse.json(
+        { code: error.name === "AuthError" ? "AUTH_ERROR" : "API_ERROR", message: error.message },
+        { status: error.statusCode }
+      );
+    }
+
+    console.error("[agents/id] PATCH error:", error);
     return NextResponse.json(
       { code: "INTERNAL_ERROR", message: "Internal server error" },
       { status: 500 }

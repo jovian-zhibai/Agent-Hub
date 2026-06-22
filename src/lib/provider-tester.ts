@@ -19,6 +19,19 @@ export interface TestResult {
   };
 }
 
+interface ModelResponse {
+  data?: Array<{ id: string; [key: string]: unknown }>;
+  [key: string]: unknown;
+}
+
+interface ErrorResponse {
+  error?: {
+    message?: string;
+    [key: string]: unknown;
+  };
+  [key: string]: unknown;
+}
+
 /**
  * Test an API key against its provider.
  * 
@@ -85,8 +98,8 @@ async function testOpenAIKey(apiKey: string, baseUrl?: string): Promise<TestResu
     };
 
     if (response.ok) {
-      const data = await response.json();
-      const models = data.data?.map((m: any) => m.id) || [];
+      const data = await response.json() as ModelResponse;
+      const models = data.data?.map((m) => m.id) || [];
 
       return {
         success: true,
@@ -100,7 +113,7 @@ async function testOpenAIKey(apiKey: string, baseUrl?: string): Promise<TestResu
     }
 
     // Handle error responses
-    const errorData = await response.json().catch(() => ({}));
+    const errorData = await response.json().catch(() => ({})) as ErrorResponse;
     const errorMessage = errorData.error?.message || response.statusText;
 
     if (response.status === 401) {
@@ -159,8 +172,8 @@ async function testAnthropicKey(apiKey: string, baseUrl?: string): Promise<TestR
     });
 
     if (response.ok) {
-      const data = await response.json();
-      const models = data.data?.map((m: any) => m.id) || [];
+      const data = await response.json() as ModelResponse;
+      const models = data.data?.map((m) => m.id) || [];
 
       return {
         success: true,
@@ -170,7 +183,7 @@ async function testAnthropicKey(apiKey: string, baseUrl?: string): Promise<TestR
       };
     }
 
-    const errorData = await response.json().catch(() => ({}));
+    const errorData = await response.json().catch(() => ({})) as ErrorResponse;
     const errorMessage = errorData.error?.message || response.statusText;
 
     if (response.status === 401 || response.status === 403) {
@@ -229,8 +242,8 @@ async function testOpenRouterKey(apiKey: string, baseUrl?: string): Promise<Test
     });
 
     if (response.ok) {
-      const data = await response.json();
-      const models = data.data?.map((m: any) => m.id) || [];
+      const data = await response.json() as ModelResponse;
+      const models = data.data?.map((m) => m.id) || [];
 
       return {
         success: true,
@@ -240,7 +253,7 @@ async function testOpenRouterKey(apiKey: string, baseUrl?: string): Promise<Test
       };
     }
 
-    const errorData = await response.json().catch(() => ({}));
+    const errorData = await response.json().catch(() => ({})) as ErrorResponse;
     const errorMessage = errorData.error?.message || response.statusText;
 
     if (response.status === 401 || response.status === 403) {
@@ -298,8 +311,8 @@ async function testGenericOpenAICompatible(apiKey: string, baseUrl: string): Pro
     });
 
     if (response.ok) {
-      const data = await response.json();
-      const models = data.data?.map((m: any) => m.id) || [];
+      const data = await response.json() as ModelResponse;
+      const models = data.data?.map((m) => m.id) || [];
 
       return {
         success: true,
@@ -309,7 +322,7 @@ async function testGenericOpenAICompatible(apiKey: string, baseUrl: string): Pro
       };
     }
 
-    const errorData = await response.json().catch(() => ({}));
+    const errorData = await response.json().catch(() => ({})) as ErrorResponse;
     const errorMessage = errorData.error?.message || response.statusText;
 
     if (response.status === 401 || response.status === 403) {

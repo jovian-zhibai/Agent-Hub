@@ -7,7 +7,11 @@ import { prisma } from "./prisma";
 // Constants
 // ──────────────────────────────────────────────
 
-const JWT_SECRET = process.env.JWT_SECRET || "dev-secret-change-in-production";
+const rawSecret = process.env.JWT_SECRET;
+if (!rawSecret) {
+  throw new Error("JWT_SECRET environment variable is required");
+}
+const JWT_SECRET: string = rawSecret;
 const ACCESS_TOKEN_EXPIRY = "2h";
 const REFRESH_TOKEN_EXPIRY = "30d";
 
@@ -18,11 +22,19 @@ const REFRESH_TOKEN_EXPIRY = "30d";
 export interface TokenPayload {
   userId: string;
   email: string;
+  type: "access" | "refresh";
+  tokenVersion: number;
 }
 
 export interface AgentTokenPayload {
   userId: string;
   type: "agent";
+  agentId?: string;
+}
+
+export interface SSETokenPayload {
+  userId: string;
+  type: "sse";
 }
 
 // ──────────────────────────────────────────────
@@ -54,16 +66,22 @@ export async function verifyPassword(
 /**
  * Generate access and refresh tokens for a user.
  */
-export function generateTokens(payload: TokenPayload): {
+export function generateTokens(
+  payload: TokenPayload & { tokenVersion: number }
+): {
   accessToken: string;
   refreshToken: string;
 } {
-  const accessToken = jwt.sign(payload, JWT_SECRET, {
-    expiresIn: ACCESS_TOKEN_EXPIRY,
-  });
-  const refreshToken = jwt.sign(payload, JWT_SECRET, {
-    expiresIn: REFRESH_TOKEN_EXPIRY,
-  });
+  const accessToken = jwt.sign(
+    { userId: payload.userId, email: payload.email, type: "access", tokenVersion: payload.tokenVersion },
+    JWT_SECRET,
+    { expiresIn: ACCESS_TOKEN_EXPIRY }
+  );
+  const refreshToken = jwt.sign(
+    { userId: payload.userId, type: "refresh", tokenVersion: payload.tokenVersion },
+    JWT_SECRET,
+    { expiresIn: REFRESH_TOKEN_EXPIRY }
+  );
   return { accessToken, refreshToken };
 }
 
@@ -73,7 +91,12 @@ export function generateTokens(payload: TokenPayload): {
  */
 export function verifyToken(token: string): TokenPayload | null {
   try {
-    const decoded = jwt.verify(token, JWT_SECRET) as TokenPayload;
+    const decoded = jwt.verify(token, JWT_SECRET, {
+      algorithms: ["HS256"],
+    }) as TokenPayload;
+    if (!decoded.type || (decoded.type !== "access" && decoded.type !== "refresh")) {
+      return null;
+    }
     return decoded;
   } catch {
     return null;
@@ -86,16 +109,45 @@ export function verifyToken(token: string): TokenPayload | null {
  * Intentionally no expiry on the constant — 365d is a reasonable
  * default; users rotate via the API when needed.
  */
-export function generateAgentToken(userId: string): string {
+export function generateAgentToken(userId: string, agentId?: string): string {
   const payload: AgentTokenPayload = { userId, type: "agent" };
+  if (agentId) {
+    payload.agentId = agentId;
+  }
   return jwt.sign(payload, JWT_SECRET, { expiresIn: "365d" });
 }
 
 /**
- * Verify an agent token from the Authorization header.
+ * Generate a short-lived SSE token (5 minutes).
+ */
+export function generateSSEToken(userId: string): string {
+  const payload: SSETokenPayload = { userId, type: "sse" };
+  return jwt.sign(payload, JWT_SECRET, { expiresIn: "5m" });
+}
+
+/**
+ * Verify an SSE token from the ?token= query param.
  * Returns the userId if valid, or null if missing/invalid.
  */
-export function verifyAgentToken(request: NextRequest): string | null {
+export function verifySSEToken(token: string): string | null {
+  try {
+    const decoded = jwt.verify(token, JWT_SECRET, {
+      algorithms: ["HS256"],
+    }) as SSETokenPayload;
+    if (decoded.type !== "sse") {
+      return null;
+    }
+    return decoded.userId;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Verify an agent token from the Authorization header.
+ * Returns token payload if valid, or null if missing/invalid.
+ */
+export function verifyAgentToken(request: NextRequest): AgentTokenPayload | null {
   const authHeader = request.headers.get("Authorization");
   if (!authHeader || !authHeader.startsWith("Bearer ")) {
     return null;
@@ -103,11 +155,13 @@ export function verifyAgentToken(request: NextRequest): string | null {
 
   const token = authHeader.slice(7);
   try {
-    const decoded = jwt.verify(token, JWT_SECRET) as AgentTokenPayload;
+    const decoded = jwt.verify(token, JWT_SECRET, {
+      algorithms: ["HS256"],
+    }) as AgentTokenPayload;
     if (decoded.type !== "agent") {
       return null;
     }
-    return decoded.userId;
+    return decoded;
   } catch {
     return null;
   }
@@ -127,7 +181,7 @@ export function verifyAgentToken(request: NextRequest): string | null {
  */
 export async function getAuthUser(
   request: NextRequest
-): Promise<{ id: string; email: string; name: string; plan: string }> {
+): Promise<{ id: string; email: string; name: string; plan: string; tokenVersion: number }> {
   const authHeader = request.headers.get("Authorization");
   if (!authHeader || !authHeader.startsWith("Bearer ")) {
     throw new AuthError("Missing or invalid authorization header", 401);
@@ -141,11 +195,16 @@ export async function getAuthUser(
 
   const account = await prisma.account.findUnique({
     where: { id: payload.userId },
-    select: { id: true, email: true, name: true, plan: true },
+    select: { id: true, email: true, name: true, plan: true, tokenVersion: true },
   });
 
   if (!account) {
     throw new AuthError("User not found", 401);
+  }
+
+  // Check tokenVersion: if the stored version differs, the token has been revoked
+  if (payload.tokenVersion !== account.tokenVersion) {
+    throw new AuthError("Token has been revoked", 401);
   }
 
   return account;

@@ -69,6 +69,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     try {
       const res = await authApi.login(email, password);
       localStorage.setItem("auth_token", res.accessToken);
+      // C7: refresh_token is stored in HttpOnly cookie by server
       setToken(res.accessToken);
       persistUser(res.user);
     } catch (err) {
@@ -84,6 +85,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       try {
         const res = await authApi.register(email, password, name);
         localStorage.setItem("auth_token", res.accessToken);
+        // C7: refresh_token is stored in HttpOnly cookie by server
         setToken(res.accessToken);
         persistUser(res.user);
       } catch (err) {

@@ -38,6 +38,13 @@ enum KeyScope {
   workspace
 }
 
+enum KeyBindingStatus {
+  active
+  standby
+  depleted
+  failed
+}
+
 enum EventType {
   tool_call
   token_usage
@@ -54,13 +61,14 @@ enum EventType {
 // ──────────────────────────────────────────────
 
 model Account {
-  id        String   @id @default(uuid())
-  name      String
-  email     String   @unique
-  plan      String   // free / pro / team
-  passwordHash String @map("password_hash")
-  createdAt DateTime @default(now()) @map("created_at")
-  updatedAt DateTime @updatedAt @map("updated_at")
+  id           String   @id @default(uuid())
+  name         String
+  email        String   @unique
+  plan         String   // free / pro / team
+  passwordHash String   @map("password_hash")
+  tokenVersion Int      @default(0) @map("token_version")
+  createdAt    DateTime @default(now()) @map("created_at")
+  updatedAt    DateTime @updatedAt @map("updated_at")
 
   agents    Agent[]
   keys      Key[]
@@ -138,14 +146,17 @@ model Key {
   workspaceId    String?   @map("workspace_id")
   group          String?
   note           String?
-  initialBalance Decimal?  @map("initial_balance")
-  balanceNote    String?   @map("balance_note")
-  health         KeyHealth @default(normal)
-  burnRate       Decimal?  @map("burn_rate")       // Daily average consumption rate
-  lastTestedAt   DateTime? @map("last_tested_at")
-  isActive       Boolean   @default(true) @map("is_active")
-  createdAt      DateTime  @default(now()) @map("created_at")
-  updatedAt      DateTime  @updatedAt @map("updated_at")
+  initialBalance     Decimal?  @map("initial_balance")
+  currentBalance     Decimal?  @map("current_balance")     // Live remaining balance, decremented as cost accrues
+  spent              Decimal   @default(0)                  // Cumulative spend on this key
+  balanceNote        String?   @map("balance_note")
+  health             KeyHealth @default(normal)
+  burnRate           Decimal?  @map("burn_rate")            // Daily average consumption rate
+  burnRateComputedAt DateTime? @map("burn_rate_computed_at")
+  lastTestedAt       DateTime? @map("last_tested_at")
+  isActive           Boolean   @default(true) @map("is_active")
+  createdAt          DateTime  @default(now()) @map("created_at")
+  updatedAt          DateTime  @updatedAt @map("updated_at")
 
   account      Account          @relation(fields: [accountId], references: [id], onDelete: Cascade)
   provider     Provider         @relation(fields: [providerId], references: [id])
@@ -154,6 +165,7 @@ model Key {
   failoverFrom FailoverLog[]    @relation("failover_from")
   failoverTo   FailoverLog[]    @relation("failover_to")
 
+  @@unique([accountId, keyLabel])
   @@index([accountId, providerId])
   @@map("keys")
 }
@@ -167,7 +179,7 @@ model KeyBinding {
   agentId   String   @map("agent_id")
   keyId     String   @map("key_id")
   priority  Int      // Lower = higher priority
-  status    String   // active / standby / depleted / failed
+  status    KeyBindingStatus @default(standby) // active / standby / depleted / failed
   createdAt DateTime @default(now()) @map("created_at")
 
   agent Agent @relation(fields: [agentId], references: [id], onDelete: Cascade)
@@ -226,6 +238,7 @@ model Model {
 
 model TelemetryLog {
   id         String    @id @default(uuid())
+  eventId    String    @unique @map("event_id")  // Deterministic ID for idempotent ingestion
   agentId    String    @map("agent_id")
   keyId      String?   @map("key_id")
   accountId  String    @map("account_id")
@@ -235,8 +248,8 @@ model TelemetryLog {
   ingestedAt DateTime  @default(now()) @map("ingested_at")
 
   agent   Agent    @relation(fields: [agentId], references: [id], onDelete: Cascade)
-  key     Key?     @relation(fields: [keyId], references: [id])
-  account Account  @relation(fields: [accountId], references: [id])
+  key     Key?     @relation(fields: [keyId], references: [id], onDelete: SetNull)
+  account Account  @relation(fields: [accountId], references: [id], onDelete: Cascade)
 
   @@index([agentId, reportedAt(sort: Desc)])
   @@index([keyId, reportedAt(sort: Desc)])
@@ -290,14 +303,14 @@ model TelemetryDaily {
 model FailoverLog {
   id          String   @id @default(uuid())
   agentId     String   @map("agent_id")
-  fromKeyId   String   @map("from_key_id")
-  toKeyId     String   @map("to_key_id")
+  fromKeyId   String?  @map("from_key_id")
+  toKeyId     String?  @map("to_key_id")
   reason      String   // rate_limited / invalid / manual_switch
   triggeredAt DateTime @map("triggered_at")
 
   agent   Agent @relation(fields: [agentId], references: [id], onDelete: Cascade)
-  fromKey Key   @relation("failover_from", fields: [fromKeyId], references: [id])
-  toKey   Key   @relation("failover_to", fields: [toKeyId], references: [id])
+  fromKey Key?  @relation("failover_from", fields: [fromKeyId], references: [id], onDelete: SetNull)
+  toKey   Key?  @relation("failover_to", fields: [toKeyId], references: [id], onDelete: SetNull)
 
   @@index([agentId, triggeredAt(sort: Desc)])
   @@map("failover_logs")
@@ -317,7 +330,7 @@ model AuditLog {
   details     Json?    // JSONB — before/after diff
   createdAt   DateTime @default(now()) @map("created_at")
 
-  account Account @relation(fields: [accountId], references: [id])
+  account Account @relation(fields: [accountId], references: [id], onDelete: Cascade)
 
   @@index([accountId, createdAt(sort: Desc)])
   @@index([action, createdAt(sort: Desc)])

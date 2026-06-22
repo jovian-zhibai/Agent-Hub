@@ -25,6 +25,39 @@ async function fetchAPI<T>(
     ...options,
   });
 
+  // ── Auto-refresh on 401 with token rotation ──
+  if (res.status === 401 && typeof window !== "undefined") {
+    // C7: refresh_token is stored in HttpOnly cookie, automatically sent by browser
+    try {
+      const refreshRes = await fetch(`${API_BASE}/v1/auth/refresh`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        credentials: "include", // C7: Send HttpOnly cookie
+        body: JSON.stringify({}), // Server reads refresh_token from cookie
+      });
+
+      if (refreshRes.ok) {
+        const { accessToken: newToken } = await refreshRes.json();
+        localStorage.setItem("auth_token", newToken);
+        // Retry the original request with the new token
+        options = {
+          ...options,
+          headers: {
+            ...options?.headers,
+            Authorization: `Bearer ${newToken}`,
+          },
+        };
+        return fetchAPI<T>(path, options);
+      }
+    } catch {
+      // Refresh network error — fall through to cleanup
+    }
+    // Refresh failed: clear all tokens
+    localStorage.removeItem("auth_token");
+    window.location.href = "/";
+    throw new Error("Session expired");
+  }
+
   if (!res.ok) {
     const body = await res.json().catch(() => ({}));
     throw new Error(body.message || `API error: ${res.status}`);
@@ -179,14 +212,47 @@ export interface Model {
 
 // ── SWR fetcher ───────────────────────────────
 
-export const fetcher = (url: string) => {
+export const fetcher = async (url: string) => {
   const token = typeof window !== "undefined" ? localStorage.getItem("auth_token") : null;
-  return fetch(`${API_BASE}${url}`, {
+  const res = await fetch(`${API_BASE}${url}`, {
     headers: { ...(token ? { Authorization: `Bearer ${token}` } : {}), "Content-Type": "application/json" },
-  }).then(res => {
-    if (!res.ok) throw new Error(`API error: ${res.status}`);
-    return res.json();
   });
+
+  // ── Auto-refresh on 401 with token rotation ──
+  if (res.status === 401 && typeof window !== "undefined") {
+    // C7: refresh_token is stored in HttpOnly cookie, automatically sent by browser
+    try {
+      const refreshRes = await fetch(`${API_BASE}/v1/auth/refresh`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        credentials: "include",
+        body: JSON.stringify({}),
+      });
+
+      if (refreshRes.ok) {
+        const { accessToken: newToken } =
+          await refreshRes.json();
+        localStorage.setItem("auth_token", newToken);
+        // Retry the original request with the new token
+        const retryRes = await fetch(`${API_BASE}${url}`, {
+          headers: {
+            Authorization: `Bearer ${newToken}`,
+            "Content-Type": "application/json",
+          },
+        });
+        if (retryRes.ok) return retryRes.json();
+      }
+    } catch {
+      // Refresh network error — fall through to cleanup
+    }
+    // Refresh failed: clear all tokens
+    localStorage.removeItem("auth_token");
+    window.location.href = "/";
+    throw new Error("Session expired");
+  }
+
+  if (!res.ok) throw new Error(`API error: ${res.status}`);
+  return res.json();
 };
 
 export interface Provider {
@@ -199,13 +265,13 @@ export interface Provider {
 
 export const auth = {
   login: (email: string, password: string) =>
-    fetchAPI<{ accessToken: string; user: Record<string, unknown> }>(
+    fetchAPI<{ accessToken: string; refreshToken: string; user: Record<string, unknown> }>(
       "/v1/auth/login",
       { method: "POST", body: JSON.stringify({ email, password }) }
     ),
 
   register: (email: string, password: string, name: string) =>
-    fetchAPI<{ accessToken: string; user: Record<string, unknown> }>(
+    fetchAPI<{ accessToken: string; refreshToken: string; user: Record<string, unknown> }>(
       "/v1/auth/register",
       { method: "POST", body: JSON.stringify({ email, password, name }) }
     ),
@@ -225,6 +291,12 @@ export const agents = {
 
   get: (id: string) =>
     fetchAPI<AgentDetailResponse>(`/v1/agents/${id}`),
+
+  update: (id: string, data: Record<string, unknown>) =>
+    fetchAPI<Record<string, unknown>>(`/v1/agents/${id}`, {
+      method: "PATCH",
+      body: JSON.stringify(data),
+    }),
 
   getCostTrend: (id: string, range = "7d") =>
     fetchAPI<{ trend: CostPoint[]; total: number }>(

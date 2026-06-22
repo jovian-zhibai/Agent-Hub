@@ -28,9 +28,9 @@ function createMockRequest(ip = "127.0.0.1", authToken?: string): NextRequest {
 }
 
 describe("Rate Limiting", () => {
-  beforeEach(() => {
+  beforeEach(async () => {
     // Clean up before each test
-    clearRateLimitStore();
+    await clearRateLimitStore();
   });
 
   describe("rateLimit", () => {

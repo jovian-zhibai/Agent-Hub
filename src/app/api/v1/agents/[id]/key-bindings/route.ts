@@ -166,37 +166,41 @@ export async function PUT(
     }
 
     // ── Replace bindings in a transaction ──────
-    const newBindings = await prisma.$transaction(async (tx) => {
+    await prisma.$transaction(async (tx) => {
       // Delete all existing bindings for this agent
       await tx.keyBinding.deleteMany({ where: { agentId } });
 
       // Create new bindings
-      const created = await Promise.all(
+      await Promise.all(
         bindings.map((b) =>
           tx.keyBinding.create({
             data: {
               agentId,
               keyId: b.keyId,
               priority: b.priority,
-              status: b.status ?? "active",
-            },
-            include: {
-              key: {
-                select: {
-                  id: true,
-                  keyLabel: true,
-                  protocol: true,
-                  provider: {
-                    select: { id: true, name: true, displayName: true },
-                  },
-                },
-              },
+              status: (b.status ?? "active") as "active" | "standby" | "depleted" | "failed",
             },
           })
         )
       );
+    });
 
-      return created;
+    // Re-fetch with includes (avoids $transaction type inference issue)
+    const newBindings = await prisma.keyBinding.findMany({
+      where: { agentId },
+      include: {
+        key: {
+          select: {
+            id: true,
+            keyLabel: true,
+            protocol: true,
+            provider: {
+              select: { id: true, name: true, displayName: true },
+            },
+          },
+        },
+      },
+      orderBy: { priority: "asc" },
     });
 
     const result: KeyBindingResponse[] = newBindings.map((b) => ({
