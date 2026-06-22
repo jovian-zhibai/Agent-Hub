@@ -8,6 +8,7 @@ import {
   buildBudgetAlert,
   type BudgetAlert,
 } from "@/lib/budget";
+import { batchTelemetrySchema, validate, ValidationError, formatValidationErrors } from "@/lib/validation";
 
 // ──────────────────────────────────────────────
 // POST /api/v1/telemetry/batch
@@ -42,14 +43,7 @@ export async function POST(request: NextRequest) {
     }
 
     const body = await request.json();
-    const { events } = body as { events?: TelemetryEventInput[] };
-
-    if (!events || !Array.isArray(events) || events.length === 0) {
-      return NextResponse.json(
-        { code: "VALIDATION_ERROR", message: "events array is required" },
-        { status: 400 }
-      );
-    }
+    const { events } = validate(batchTelemetrySchema, body);
 
     // ── Agent ownership verification ─────────
     // For agent auth (SDK): verify agentId matches the agent token
@@ -328,6 +322,12 @@ export async function POST(request: NextRequest) {
       { status: 200 }
     );
   } catch (error) {
+    if (error instanceof ValidationError) {
+      return NextResponse.json(
+        { code: "VALIDATION_ERROR", message: formatValidationErrors(error.errors) },
+        { status: 400 }
+      );
+    }
     if (error instanceof ApiError) {
       return NextResponse.json(
         { code: error.name === "AuthError" ? "AUTH_ERROR" : "API_ERROR", message: error.message },

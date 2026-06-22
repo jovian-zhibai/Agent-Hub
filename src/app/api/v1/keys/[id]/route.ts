@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { prisma } from "@/lib/prisma";
 import { getAuthUser, ApiError } from "@/lib/auth";
+import { updateKeySchema, validate, ValidationError, formatValidationErrors } from "@/lib/validation";
 
 // ──────────────────────────────────────────────
 // GET /api/v1/keys/:id
@@ -111,13 +112,7 @@ export async function PATCH(
 
     // ── Parse body ─────────────────────────────
     const body = await request.json();
-    const { keyLabel, note, initialBalance, group, isActive } = body as {
-      keyLabel?: string;
-      note?: string;
-      initialBalance?: number;
-      group?: string;
-      isActive?: boolean;
-    };
+    const { keyLabel, note, initialBalance, group, isActive } = validate(updateKeySchema, body);
 
     // ── Build update data (editable fields only)─
     const updateData: Record<string, unknown> = {};
@@ -168,6 +163,12 @@ export async function PATCH(
 
     return NextResponse.json({ key: response }, { status: 200 });
   } catch (error) {
+    if (error instanceof ValidationError) {
+      return NextResponse.json(
+        { code: "VALIDATION_ERROR", message: formatValidationErrors(error.errors) },
+        { status: 400 }
+      );
+    }
     if (error instanceof ApiError) {
       return NextResponse.json(
         { code: error.name === "AuthError" ? "AUTH_ERROR" : "API_ERROR", message: error.message },

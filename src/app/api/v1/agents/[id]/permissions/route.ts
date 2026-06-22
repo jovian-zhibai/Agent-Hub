@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { prisma } from "@/lib/prisma";
 import { getAuthUser, ApiError } from "@/lib/auth";
+import { updatePermissionSchema, validate, ValidationError, formatValidationErrors } from "@/lib/validation";
 
 // ──────────────────────────────────────────────
 // Types
@@ -122,10 +123,7 @@ export async function PATCH(
 
     // ── Parse body ─────────────────────────────
     const body = await request.json();
-    const { rules, safetyMode } = body as {
-      rules?: Record<string, unknown>;
-      safetyMode?: boolean;
-    };
+    const { rules, safetyMode } = validate(updatePermissionSchema, body);
 
     // ── Upsert permission ──────────────────────
     // Merge rules into existing rules if present
@@ -161,6 +159,12 @@ export async function PATCH(
       { status: 200 }
     );
   } catch (error) {
+    if (error instanceof ValidationError) {
+      return NextResponse.json(
+        { code: "VALIDATION_ERROR", message: formatValidationErrors(error.errors) },
+        { status: 400 }
+      );
+    }
     if (error instanceof ApiError) {
       return NextResponse.json(
         { code: error.name === "AuthError" ? "AUTH_ERROR" : "API_ERROR", message: error.message },

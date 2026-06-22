@@ -3,6 +3,7 @@ import bcrypt from "bcryptjs";
 import { prisma } from "@/lib/prisma";
 import { verifyPassword, generateTokens, generateAgentToken, ApiError } from "@/lib/auth";
 import { rateLimit, RateLimitPresets } from "@/lib/rate-limit";
+import { loginSchema, validate, ValidationError, formatValidationErrors } from "@/lib/validation";
 
 // ──────────────────────────────────────────────
 // POST /api/v1/auth/login
@@ -21,18 +22,8 @@ export async function POST(request: NextRequest) {
 
   try {
     const body = await request.json();
-    const { email, password } = body as {
-      email?: string;
-      password?: string;
-    };
-
-    // ── Validate inputs ────────────────────────
-    if (!email || !password) {
-      return NextResponse.json(
-        { code: "VALIDATION_ERROR", message: "Email and password are required" },
-        { status: 400 }
-      );
-    }
+    // B11: replace manual `body as {}` + ad-hoc checks with zod schema
+    const { email, password } = validate(loginSchema, body);
 
     // ── Find account ───────────────────────────
     const account = await prisma.account.findUnique({
@@ -101,6 +92,12 @@ export async function POST(request: NextRequest) {
 
     return response;
   } catch (error) {
+    if (error instanceof ValidationError) {
+      return NextResponse.json(
+        { code: "VALIDATION_ERROR", message: formatValidationErrors(error.errors) },
+        { status: 400 }
+      );
+    }
     if (error instanceof ApiError) {
       return NextResponse.json(
         { code: "API_ERROR", message: error.message },

@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { prisma } from "@/lib/prisma";
 import { getAuthUser, ApiError } from "@/lib/auth";
 import { encryptKey, extractKeyPrefix } from "@/lib/crypto";
+import { createKeySchema, validate, ValidationError, formatValidationErrors } from "@/lib/validation";
 
 // ──────────────────────────────────────────────
 // Types
@@ -108,31 +109,22 @@ export async function POST(request: NextRequest) {
     const body = await request.json();
     // ── Field aliasing for frontend compatibility ──
     // Frontend sends `provider` (name) instead of `providerId`; `keyValue` instead of `keyEncrypted`; `label` instead of `keyLabel`
-    const providerId = body.providerId || body.provider;
-    const keyEncrypted = body.keyEncrypted || body.keyValue;
-    const keyLabel = body.keyLabel || body.label;
-
+    const normalized = {
+      ...body,
+      providerId: body.providerId || body.provider,
+      keyValue: body.keyValue || body.keyEncrypted,
+      keyLabel: body.keyLabel || body.label,
+    };
     const {
+      providerId,
       protocol,
+      keyLabel,
+      keyValue,
       scope,
       group,
       note,
       initialBalance,
-    } = body as {
-      protocol?: string;
-      scope?: string;
-      group?: string;
-      note?: string;
-      initialBalance?: number;
-    };
-
-    // ── Validate required fields ────────────
-    if (!providerId || !protocol || !keyLabel || !keyEncrypted) {
-      return NextResponse.json(
-        { code: "VALIDATION_ERROR", message: "providerId (or provider), protocol, keyLabel (or label), and keyEncrypted (or keyValue) are required" },
-        { status: 400 }
-      );
-    }
+    } = validate(createKeySchema, normalized);
 
     // ── Verify provider exists ──────────────
     // `providerId` may be a UUID or a provider name — try both
@@ -156,8 +148,8 @@ export async function POST(request: NextRequest) {
     }
 
     // ── Encrypt key with AES-256-GCM ─────────
-    const encryptedValue = encryptKey(keyEncrypted);
-    const keyPrefix = extractKeyPrefix(keyEncrypted);
+    const encryptedValue = encryptKey(keyValue);
+    const keyPrefix = extractKeyPrefix(keyValue);
 
     // ── Check for duplicate key label ─────────
     const existing = await prisma.key.findFirst({
@@ -216,6 +208,12 @@ export async function POST(request: NextRequest) {
 
     return NextResponse.json({ key: response }, { status: 201 });
   } catch (error) {
+    if (error instanceof ValidationError) {
+      return NextResponse.json(
+        { code: "VALIDATION_ERROR", message: formatValidationErrors(error.errors) },
+        { status: 400 }
+      );
+    }
     if (error instanceof ApiError) {
       return NextResponse.json(
         { code: error.name === "AuthError" ? "AUTH_ERROR" : "API_ERROR", message: error.message },

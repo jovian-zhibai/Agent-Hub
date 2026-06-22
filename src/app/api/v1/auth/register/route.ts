@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { prisma } from "@/lib/prisma";
 import { hashPassword, generateTokens, generateAgentToken, ApiError } from "@/lib/auth";
 import { rateLimit, RateLimitPresets } from "@/lib/rate-limit";
+import { registerSchema, validate, ValidationError, formatValidationErrors } from "@/lib/validation";
 
 // ──────────────────────────────────────────────
 // POST /api/v1/auth/register
@@ -20,33 +21,7 @@ export async function POST(request: NextRequest) {
 
   try {
     const body = await request.json();
-    const { email, password, name } = body as {
-      email?: string;
-      password?: string;
-      name?: string;
-    };
-
-    // ── Validate inputs ────────────────────────
-    if (!email || !password) {
-      return NextResponse.json(
-        { code: "VALIDATION_ERROR", message: "Email and password are required" },
-        { status: 400 }
-      );
-    }
-
-    if (typeof email !== "string" || typeof password !== "string") {
-      return NextResponse.json(
-        { code: "VALIDATION_ERROR", message: "Email and password must be strings" },
-        { status: 400 }
-      );
-    }
-
-    if (password.length < 6) {
-      return NextResponse.json(
-        { code: "VALIDATION_ERROR", message: "Password must be at least 6 characters" },
-        { status: 400 }
-      );
-    }
+    const { email, password, name } = validate(registerSchema, body);
 
     // ── Check for existing account ─────────────
     const existing = await prisma.account.findUnique({
@@ -112,6 +87,12 @@ export async function POST(request: NextRequest) {
 
     return response;
   } catch (error) {
+    if (error instanceof ValidationError) {
+      return NextResponse.json(
+        { code: "VALIDATION_ERROR", message: formatValidationErrors(error.errors) },
+        { status: 400 }
+      );
+    }
     if (error instanceof ApiError) {
       return NextResponse.json(
         { code: "API_ERROR", message: error.message },

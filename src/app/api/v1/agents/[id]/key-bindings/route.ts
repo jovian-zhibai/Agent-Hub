@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { prisma } from "@/lib/prisma";
 import { getAuthUser, ApiError } from "@/lib/auth";
+import { updateKeyBindingsSchema, validate, ValidationError, formatValidationErrors } from "@/lib/validation";
 
 // ──────────────────────────────────────────────
 // Types
@@ -139,14 +140,7 @@ export async function PUT(
 
     // ── Parse body ─────────────────────────────
     const body = await request.json();
-    const { bindings } = body as { bindings?: KeyBindingInput[] };
-
-    if (!bindings || !Array.isArray(bindings)) {
-      return NextResponse.json(
-        { code: "VALIDATION_ERROR", message: "bindings array is required" },
-        { status: 400 }
-      );
-    }
+    const { bindings } = validate(updateKeyBindingsSchema, body);
 
     // ── Validate all keyIds belong to this user ─
     const keyIds = [...new Set(bindings.map((b) => b.keyId))];
@@ -219,6 +213,12 @@ export async function PUT(
 
     return NextResponse.json({ bindings: result }, { status: 200 });
   } catch (error) {
+    if (error instanceof ValidationError) {
+      return NextResponse.json(
+        { code: "VALIDATION_ERROR", message: formatValidationErrors(error.errors) },
+        { status: 400 }
+      );
+    }
     if (error instanceof ApiError) {
       return NextResponse.json(
         { code: error.name === "AuthError" ? "AUTH_ERROR" : "API_ERROR", message: error.message },

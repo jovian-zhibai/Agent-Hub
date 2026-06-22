@@ -161,6 +161,7 @@ export const updateModelSchema = z.object({
 export const telemetryEventSchema = z.object({
   agentId: z.string().uuid(),
   keyId: z.string().uuid().optional(),
+  eventId: z.string().optional(), // B7: deterministic ID for idempotent ingestion
   eventType: z.enum([
     "tool_call",
     "token_usage",
@@ -176,7 +177,7 @@ export const telemetryEventSchema = z.object({
 });
 
 export const batchTelemetrySchema = z.object({
-  events: z.array(telemetryEventSchema).min(1).max(100),
+  events: z.array(telemetryEventSchema).min(1).max(500),
 });
 
 // ──────────────────────────────────────────────
