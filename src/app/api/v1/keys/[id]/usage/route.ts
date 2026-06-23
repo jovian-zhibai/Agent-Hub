@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { prisma } from "@/lib/prisma";
 import { getAuthUser, ApiError } from "@/lib/auth";
 import { computeEventCost, loadPricingMap } from "@/lib/cost";
+import { uuidSchema, validate, ValidationError } from "@/lib/validation";
 
 // ──────────────────────────────────────────────
 // Types
@@ -73,6 +74,18 @@ export async function GET(
   try {
     const user = await getAuthUser(request);
     const { id: keyId } = await params;
+
+    try {
+      validate(uuidSchema, keyId);
+    } catch (e) {
+      if (e instanceof ValidationError) {
+        return NextResponse.json(
+          { code: "VALIDATION_ERROR", message: "Invalid ID format" },
+          { status: 400 }
+        );
+      }
+      throw e;
+    }
 
     // ── Verify key belongs to user ────────────
     const key = await prisma.key.findUnique({

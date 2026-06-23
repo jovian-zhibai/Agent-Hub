@@ -67,7 +67,7 @@ export async function POST(request: NextRequest) {
     }
 
     // C2: Check tokenVersion — if it doesn't match, the token was revoked
-    if (decoded.tokenVersion !== undefined && decoded.tokenVersion !== user.tokenVersion) {
+    if (decoded.tokenVersion !== user.tokenVersion) {
       return NextResponse.json(
         { code: "TOKEN_REVOKED", message: "Token has been revoked" },
         { status: 401 }

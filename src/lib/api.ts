@@ -9,7 +9,8 @@ export const API_BASE = RAW_BASE.endsWith("/api") ? RAW_BASE : `${RAW_BASE}/api`
 
 async function fetchAPI<T>(
   path: string,
-  options?: RequestInit
+  options?: RequestInit,
+  _isRetry = false
 ): Promise<T> {
   const token =
     typeof window !== "undefined"
@@ -27,6 +28,11 @@ async function fetchAPI<T>(
 
   // ── Auto-refresh on 401 with token rotation ──
   if (res.status === 401 && typeof window !== "undefined") {
+    if (_isRetry) {
+      localStorage.removeItem("auth_token");
+      window.location.href = "/";
+      throw new Error("Session expired");
+    }
     // C7: refresh_token is stored in HttpOnly cookie, automatically sent by browser
     try {
       const refreshRes = await fetch(`${API_BASE}/v1/auth/refresh`, {
@@ -47,7 +53,7 @@ async function fetchAPI<T>(
             Authorization: `Bearer ${newToken}`,
           },
         };
-        return fetchAPI<T>(path, options);
+        return fetchAPI<T>(path, options, true);
       }
     } catch {
       // Refresh network error — fall through to cleanup
@@ -113,6 +119,7 @@ export interface KeyOverviewItem {
   health: string;
   remaining: number | null;
   burnRate: number | null;
+  spent: number;
 }
 
 export interface DashboardResponse {
@@ -224,9 +231,20 @@ export interface Key {
 }
 
 export interface KeyUsageResponse {
-  usage: { date: string; cost: number }[];
-  total: number;
-  byAgent: { agentId: string; agentName: string; cost: number }[];
+  key: {
+    id: string;
+    keyLabel: string;
+    provider: { name: string; displayName: string };
+  };
+  usage: {
+    totalCost: number;
+    totalCalls: number;
+    totalTokensIn: number;
+    totalTokensOut: number;
+  };
+  byAgent: { agentId: string; agentName: string; cost: number; calls: number }[];
+  dailyTrend: { date: string; cost: number; calls: number }[];
+  failoverCount: number;
 }
 
 export interface DiscoverModelsResponse {
@@ -235,21 +253,29 @@ export interface DiscoverModelsResponse {
   unmatched: number;
 }
 
-export interface PermissionEntry {
-  tool: string;
-  action: "allow" | "deny" | "ask";
+export interface PermissionRules {
+  version?: number;
+  tools?: Record<string, {
+    allow?: boolean;
+    deny?: boolean;
+    ask?: boolean;
+    denyPaths?: string[];
+    writeDenyPaths?: string[];
+    safetyMode?: { deny?: boolean };
+  }>;
 }
 
 export interface PermissionsResponse {
-  permissions: PermissionEntry[];
+  rules: PermissionRules;
   safetyMode: boolean;
+  version: number;
 }
 
 export interface FailoverLog {
   id: string;
   timestamp: string;
-  fromKey: string;
-  toKey: string;
+  fromKey: string | null;
+  toKey: string | null;
   reason: string;
 }
 
@@ -262,7 +288,7 @@ export interface Model {
   modelName: string;
   displayName: string;
   providerId: string;
-  provider?: { name: string; displayName: string };
+  provider?: { id: string; name: string; displayName?: string };
   isActive: boolean;
   pricingInput?: number;
   pricingOutput?: number;
@@ -271,7 +297,7 @@ export interface Model {
 
 // ── SWR fetcher ───────────────────────────────
 
-export const fetcher = async (url: string) => {
+export const fetcher = async (url: string, _isRetry = false): Promise<any> => {
   const token = typeof window !== "undefined" ? localStorage.getItem("auth_token") : null;
   const res = await fetch(`${API_BASE}${url}`, {
     headers: { ...(token ? { Authorization: `Bearer ${token}` } : {}), "Content-Type": "application/json" },
@@ -279,6 +305,11 @@ export const fetcher = async (url: string) => {
 
   // ── Auto-refresh on 401 with token rotation ──
   if (res.status === 401 && typeof window !== "undefined") {
+    if (_isRetry) {
+      localStorage.removeItem("auth_token");
+      window.location.href = "/";
+      throw new Error("Session expired");
+    }
     // C7: refresh_token is stored in HttpOnly cookie, automatically sent by browser
     try {
       const refreshRes = await fetch(`${API_BASE}/v1/auth/refresh`, {
@@ -293,13 +324,7 @@ export const fetcher = async (url: string) => {
           await refreshRes.json();
         localStorage.setItem("auth_token", newToken);
         // Retry the original request with the new token
-        const retryRes = await fetch(`${API_BASE}${url}`, {
-          headers: {
-            Authorization: `Bearer ${newToken}`,
-            "Content-Type": "application/json",
-          },
-        });
-        if (retryRes.ok) return retryRes.json();
+        return fetcher(url, true);
       }
     } catch {
       // Refresh network error — fall through to cleanup

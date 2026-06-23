@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { prisma } from "@/lib/prisma";
 import { getAuthUser, ApiError } from "@/lib/auth";
-import { validate, ValidationError, formatValidationErrors, updateAgentSchema } from "@/lib/validation";
+import { validate, ValidationError, formatValidationErrors, updateAgentSchema, uuidSchema } from "@/lib/validation";
 
 // ──────────────────────────────────────────────
 // GET /api/v1/agents/:id
@@ -34,6 +34,18 @@ export async function GET(
   try {
     const user = await getAuthUser(request);
     const { id } = await params;
+
+    try {
+      validate(uuidSchema, id);
+    } catch (e) {
+      if (e instanceof ValidationError) {
+        return NextResponse.json(
+          { code: "VALIDATION_ERROR", message: "Invalid ID format" },
+          { status: 400 }
+        );
+      }
+      throw e;
+    }
 
     // ── Fetch agent with relations ─────────────
     const agent = await prisma.agent.findUnique({
@@ -94,7 +106,7 @@ export async function GET(
 
     const monthAgg = await prisma.telemetryDaily.aggregate({
       where: { agentId: id, day: { gte: monthStartUTC() } },
-      _sum: { toolCalls: true, cost: true },
+      _sum: { toolCalls: true, cost: true, permissionsDenied: true },
     });
 
     const todayCalls = todayAgg._sum.toolCalls ?? 0;
@@ -104,11 +116,7 @@ export async function GET(
     const avgCost = monthlyToolCalls > 0 ? monthlyCost / monthlyToolCalls : 0;
 
     // Success rate: 1 - (permissionsDenied / toolCalls) for this month
-    const monthDeniedAgg = await prisma.telemetryDaily.aggregate({
-      where: { agentId: id, day: { gte: monthStartUTC() } },
-      _sum: { permissionsDenied: true },
-    });
-    const deniedCount = monthDeniedAgg._sum.permissionsDenied ?? 0;
+    const deniedCount = monthAgg._sum.permissionsDenied ?? 0;
     const successRate = monthlyToolCalls > 0
       ? Math.max(0, 1 - deniedCount / monthlyToolCalls)
       : 1;
@@ -207,6 +215,19 @@ export async function PATCH(
   try {
     const user = await getAuthUser(request);
     const { id } = await params;
+
+    try {
+      validate(uuidSchema, id);
+    } catch (e) {
+      if (e instanceof ValidationError) {
+        return NextResponse.json(
+          { code: "VALIDATION_ERROR", message: "Invalid ID format" },
+          { status: 400 }
+        );
+      }
+      throw e;
+    }
+
     const body = await request.json();
 
     // Verify agent exists and belongs to current user

@@ -4,7 +4,7 @@ import { useState, useEffect, useCallback } from "react";
 import { useParams } from "next/navigation";
 import Link from "next/link";
 import { useAgent, useCostTrend, useCostBreakdown } from "@/lib/hooks";
-import { agents, type PermissionEntry, type FailoverLog } from "@/lib/api";
+import { agents, type FailoverLog, type PermissionsResponse, API_BASE } from "@/lib/api";
 import { Badge } from "@/components/ui/badge";
 import { Toggle } from "@/components/ui/toggle";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
@@ -19,6 +19,8 @@ import {
   Activity,
   CheckCircle2,
   Shield,
+  Download,
+  ChevronDown,
 } from "lucide-react";
 // ── Tab types ──────────────────────────────────
 
@@ -197,7 +199,7 @@ function CostBreakdownTab({ agentId }: { agentId: string }) {
     );
   }
 
-  if (error) {
+  if (error && !data) {
     throw error;
   }
 
@@ -281,7 +283,7 @@ function CostBreakdownTab({ agentId }: { agentId: string }) {
 // ── Tab 3: Permissions ─────────────────────────
 
 function PermissionsTab({ agentId }: { agentId: string }) {
-  const [data, setData] = useState<{ rules: Record<string, string>; safetyMode: boolean } | null>(null);
+  const [data, setData] = useState<PermissionsResponse | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [pendingTools, setPendingTools] = useState<Set<string>>(new Set());
@@ -291,7 +293,7 @@ function PermissionsTab({ agentId }: { agentId: string }) {
     setLoading(true);
     setError(null);
     agents.getPermissions(agentId).then((res) => {
-      if (!cancelled) setData(res as unknown as { rules: Record<string, string>; safetyMode: boolean });
+      if (!cancelled) setData(res);
     }).catch((err) => {
       if (!cancelled) setError(err instanceof Error ? err.message : "Failed to load permissions");
     }).finally(() => {
@@ -307,13 +309,14 @@ function PermissionsTab({ agentId }: { agentId: string }) {
 
   const togglePermission = async (tool: string) => {
     if (!data) return;
-    const currentAction = data.rules[tool] || "deny";
+    const toolRule = data.rules?.tools?.[tool];
+    const currentAction = toolRule?.allow ? "allow" : "deny";
     const newAction = currentAction === "allow" ? "deny" : "allow";
 
     // Optimistic update
     setData((prev) => {
       if (!prev) return prev;
-      return { ...prev, rules: { ...prev.rules, [tool]: newAction } };
+      return { ...prev, rules: { ...prev.rules, tools: { ...prev.rules.tools, [tool]: newAction === "allow" ? { allow: true, deny: false } : { allow: false, deny: true } } } };
     });
 
     setPendingTools((prev) => new Set(prev).add(tool));
@@ -330,7 +333,7 @@ function PermissionsTab({ agentId }: { agentId: string }) {
       // Rollback on failure
       setData((prev) => {
         if (!prev) return prev;
-        return { ...prev, rules: { ...prev.rules, [tool]: currentAction } };
+        return { ...prev, rules: { ...prev.rules, tools: { ...prev.rules.tools, [tool]: currentAction === "allow" ? { allow: true, deny: false } : { allow: false, deny: true } } } };
       });
     } finally {
       setPendingTools((prev) => {
@@ -375,7 +378,6 @@ function PermissionsTab({ agentId }: { agentId: string }) {
   }
 
   const allToolNames = ["edit", "bash", "read", "webfetch", "write"];
-  const rules = data?.rules || {};
 
   return (
     <Card>
@@ -385,7 +387,8 @@ function PermissionsTab({ agentId }: { agentId: string }) {
       <CardContent>
         <div className="space-y-2">
           {allToolNames.map((tool) => {
-            const action = rules[tool] || "deny";
+            const toolRule = data?.rules?.tools?.[tool];
+            const action = toolRule?.allow ? "allow" : "deny";
             const isPending = pendingTools.has(tool);
             return (
               <div
@@ -517,9 +520,9 @@ function FailoverLogsTab({ agentId }: { agentId: string }) {
                   {new Date(log.timestamp).toLocaleString()}
                 </p>
                 <p className="mt-1 text-sm text-slate-200">
-                  <span className="font-medium text-slate-300">{log.fromKey}</span>
+                  <span className="font-medium text-slate-300">{log.fromKey || "—"}</span>
                   {" → "}
-                  <span className="font-medium text-slate-300">{log.toKey}</span>
+                  <span className="font-medium text-slate-300">{log.toKey || "—"}</span>
                 </p>
                 <Badge variant="warning" className="mt-1 capitalize">
                   {log.reason}
@@ -537,12 +540,17 @@ function FailoverLogsTab({ agentId }: { agentId: string }) {
 
 export default function AgentDetailPage() {
   const params = useParams();
-  const id = params?.id as string;
+  const rawId = params?.id;
+  const id = Array.isArray(rawId) ? rawId[0] : rawId;
+  if (!id) return null;
 
   const { data, error, isLoading, mutate } = useAgent(id);
   const [activeTab, setActiveTab] = useState<Tab>("overview");
   const [loadedTabs, setLoadedTabs] = useState<Set<Tab>>(new Set(["overview"]));
   const [now, setNow] = useState(Date.now());
+  const [exportOpen, setExportOpen] = useState(false);
+  const [exporting, setExporting] = useState(false);
+  const [exportError, setExportError] = useState<string | null>(null);
 
   const agent = data?.agent ?? null;
 
@@ -555,6 +563,36 @@ export default function AgentDetailPage() {
   const handleTabChange = (tab: Tab) => {
     setActiveTab(tab);
     setLoadedTabs((prev) => new Set(prev).add(tab));
+  };
+
+  const handleExport = async (range: "7d" | "30d") => {
+    try {
+      setExporting(true);
+      setExportOpen(false);
+      setExportError(null);
+      const token = localStorage.getItem("auth_token");
+      const res = await fetch(
+        `${API_BASE}/v1/agents/${id}/export?format=csv&range=${range}`,
+        {
+          headers: { Authorization: `Bearer ${token}` },
+        }
+      );
+      if (!res.ok) throw new Error("Export failed");
+      const blob = await res.blob();
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = `agent-${id}-${range}.csv`;
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      URL.revokeObjectURL(url);
+    } catch (err) {
+      console.error("Export failed:", err);
+      setExportError("Export failed. Please try again.");
+    } finally {
+      setExporting(false);
+    }
   };
 
   // ── Loading state ──────────────────────────
@@ -658,27 +696,76 @@ export default function AgentDetailPage() {
           </div>
         </div>
 
-        {/* Enable toggle */}
-        <div className="flex items-center gap-2">
-          <span className="text-xs text-slate-400">
-            {agent.enabled ? "Enabled" : "Disabled"}
-          </span>
-          <Toggle
-            pressed={agent.enabled}
-            onClick={async () => {
-              const newEnabled = !agent.enabled;
-              // Optimistic update
-              mutate({ ...data, agent: { ...agent, enabled: newEnabled } }, false);
-              try {
-                await agents.update(id, { enabled: newEnabled });
-                // Revalidate to get fresh data from server
-                mutate();
-              } catch {
-                // Rollback on error
-                mutate({ ...data, agent: { ...agent, enabled: agent.enabled } }, false);
-              }
-            }}
-          />
+        {/* Enable toggle + Export */}
+        <div className="flex items-center gap-3">
+          {/* Export dropdown */}
+          <div className="relative">
+            <button
+              onClick={() => setExportOpen((o) => !o)}
+              disabled={exporting}
+              className="flex items-center gap-2 rounded-lg border border-slate-700 px-3 py-1.5 text-sm text-slate-200 hover:bg-slate-800 disabled:opacity-50 transition-colors"
+            >
+              {exporting ? (
+                <Loader2 className="h-4 w-4 animate-spin" />
+              ) : (
+                <Download className="h-4 w-4" />
+              )}
+              Export
+              <ChevronDown className="h-3.5 w-3.5 text-slate-400" />
+            </button>
+            {exportOpen && (
+              <>
+                {/* Click-away overlay */}
+                <div
+                  className="fixed inset-0 z-40"
+                  onClick={() => setExportOpen(false)}
+                />
+                {/* Dropdown menu */}
+                <div className="absolute right-0 z-50 mt-1 w-36 rounded-lg border border-slate-700 bg-slate-800 p-1 shadow-xl">
+                  <button
+                    onClick={() => handleExport("7d")}
+                    className="flex w-full items-center justify-between rounded-md px-3 py-2 text-sm text-slate-200 hover:bg-slate-700 transition-colors"
+                  >
+                    7 days
+                    <span className="text-xs text-slate-500">CSV</span>
+                  </button>
+                  <button
+                    onClick={() => handleExport("30d")}
+                    className="flex w-full items-center justify-between rounded-md px-3 py-2 text-sm text-slate-200 hover:bg-slate-700 transition-colors"
+                  >
+                    30 days
+                    <span className="text-xs text-slate-500">CSV</span>
+                  </button>
+                </div>
+              </>
+            )}
+          </div>
+
+          {exportError && (
+            <span className="text-xs text-red-400">{exportError}</span>
+          )}
+
+          <div className="flex items-center gap-2">
+            <span className="text-xs text-slate-400">
+              {agent.enabled ? "Enabled" : "Disabled"}
+            </span>
+            <Toggle
+              pressed={agent.enabled}
+              onClick={async () => {
+                const newEnabled = !agent.enabled;
+                // Optimistic update
+                mutate({ ...data, agent: { ...agent, enabled: newEnabled } }, false);
+                try {
+                  await agents.update(id, { enabled: newEnabled });
+                  // Revalidate to get fresh data from server
+                  mutate();
+                } catch {
+                  // Rollback on error
+                  mutate({ ...data, agent: { ...agent, enabled: agent.enabled } }, false);
+                }
+              }}
+            />
+          </div>
         </div>
       </div>
 

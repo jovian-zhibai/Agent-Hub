@@ -59,21 +59,8 @@ const HEALTH_VARIANTS: Record<string, "success" | "warning" | "danger" | "defaul
   stale: "default",
 };
 
-function maskKey(keyValue?: string): string {
-  if (!keyValue) return "";
-  if (keyValue.length <= 12) return keyValue.slice(0, 4) + "•".repeat(8) + keyValue.slice(-4);
-  return keyValue.slice(0, 4) + "•".repeat(12) + keyValue.slice(-4);
-}
-
 function getProviderIcon(name: string): string {
   return PROVIDER_ICONS[name] || "🔑";
-}
-
-function formatDate(dateStr: string): string {
-  return new Date(dateStr).toLocaleDateString("en-US", {
-    month: "short",
-    day: "numeric",
-  });
 }
 
 // ── Small Chart ─────────────────────────────────
@@ -109,7 +96,7 @@ function UsageChart({ data }: { data: { date: string; cost: number }[] }) {
                 <div className="rounded-lg border border-slate-700 bg-slate-800 px-3 py-2 shadow-lg">
                   <p className="text-xs text-slate-400">{label}</p>
                   <p className="text-sm font-semibold text-slate-100">
-                    {formatCurrency((payload[0].value as number) || 0)}
+                    {formatCurrency((payload[0]?.value as number) || 0)}
                   </p>
                 </div>
               ) : null
@@ -555,13 +542,12 @@ function DeleteConfirmDialog({
 
 interface KeyRowProps {
   keyItem: Key;
-  allKeys: Key[];
   onDelete: (id: string) => void;
   onTest: (id: string) => void;
   testingIds: Set<string>;
 }
 
-function KeyRow({ keyItem, allKeys, onDelete, onTest, testingIds }: KeyRowProps) {
+function KeyRow({ keyItem, onDelete, onTest, testingIds }: KeyRowProps) {
   const [expanded, setExpanded] = useState(false);
   const [usageData, setUsageData] = useState<KeyUsageResponse | null>(null);
   const [usageLoading, setUsageLoading] = useState(false);
@@ -689,7 +675,7 @@ function KeyRow({ keyItem, allKeys, onDelete, onTest, testingIds }: KeyRowProps)
               {/* Usage chart */}
               <div>
                 <p className="mb-1.5 text-xs font-medium text-slate-400">7-Day Consumption</p>
-                <UsageChart data={usageData?.usage || []} />
+                <UsageChart data={usageData?.dailyTrend || []} />
               </div>
 
               {/* By-agent breakdown */}
@@ -715,7 +701,7 @@ function KeyRow({ keyItem, allKeys, onDelete, onTest, testingIds }: KeyRowProps)
               {/* Summary */}
               {usageData && (
                 <div className="text-xs text-slate-500">
-                  Total: <span className="font-medium text-slate-300">{formatCurrency(usageData.total)}</span>
+                  Total: <span className="font-medium text-slate-300">{formatCurrency(usageData?.usage.totalCost ?? 0)}</span>
                 </div>
               )}
             </div>
@@ -734,15 +720,17 @@ export default function KeysPage() {
   const [testingIds, setTestingIds] = useState<Set<string>>(new Set());
   const [deleteTarget, setDeleteTarget] = useState<Key | null>(null);
   const [deleteLoading, setDeleteLoading] = useState(false);
+  const [actionError, setActionError] = useState<string | null>(null);
 
   const keyList = data?.keys ?? [];
 
   const handleTest = async (id: string) => {
     setTestingIds((prev) => new Set(prev).add(id));
+    setActionError(null);
     try {
       await keys.test(id);
-    } catch {
-      // error handled silently
+    } catch (err) {
+      setActionError(err instanceof Error ? err.message : "Test failed");
     } finally {
       setTestingIds((prev) => {
         const next = new Set(prev);
@@ -755,12 +743,13 @@ export default function KeysPage() {
   const handleDelete = async () => {
     if (!deleteTarget) return;
     setDeleteLoading(true);
+    setActionError(null);
     try {
       await keys.delete(deleteTarget.id);
       mutate();
       setDeleteTarget(null);
-    } catch {
-      // silently fail
+    } catch (err) {
+      setActionError(err instanceof Error ? err.message : "Delete failed");
     } finally {
       setDeleteLoading(false);
     }
@@ -810,6 +799,21 @@ export default function KeysPage() {
         </button>
       </div>
 
+      {/* Action error banner */}
+      {actionError && (
+        <div className="flex items-center gap-2 rounded-lg border border-red-800/40 bg-red-900/20 px-3 py-2 text-xs text-red-300">
+          <AlertCircle className="h-3.5 w-3.5 shrink-0" />
+          {actionError}
+          <button
+            type="button"
+            onClick={() => setActionError(null)}
+            className="ml-auto text-red-400 hover:text-red-200"
+          >
+            ✕
+          </button>
+        </div>
+      )}
+
       {/* Empty state */}
       {!keyList.length && (
         <Card>
@@ -839,7 +843,6 @@ export default function KeysPage() {
             <KeyRow
               key={k.id}
               keyItem={k}
-              allKeys={keyList}
               onDelete={(id) => {
                 const target = keyList.find((k2: Key) => k2.id === id);
                 if (target) setDeleteTarget(target);

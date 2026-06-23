@@ -1,18 +1,21 @@
 import { NextRequest, NextResponse } from "next/server";
 import { prisma } from "@/lib/prisma";
 import { getAuthUser, ApiError } from "@/lib/auth";
-import { updatePermissionSchema, validate, ValidationError, formatValidationErrors } from "@/lib/validation";
+import { updatePermissionSchema, validate, ValidationError, formatValidationErrors, uuidSchema } from "@/lib/validation";
 
 // ──────────────────────────────────────────────
 // Types
 // ──────────────────────────────────────────────
 
-const DEFAULT_RULES: Record<string, string> = {
-  edit: "ask",
-  bash: "ask",
-  read: "allow",
-  webfetch: "ask",
-  write: "ask",
+const DEFAULT_RULES = {
+  version: 1,
+  tools: {
+    edit: { ask: true },
+    bash: { ask: true },
+    read: { allow: true },
+    webfetch: { ask: true },
+    write: { ask: true },
+  },
 };
 
 // ──────────────────────────────────────────────
@@ -27,6 +30,18 @@ export async function GET(
   try {
     const user = await getAuthUser(request);
     const { id: agentId } = await params;
+
+    try {
+      validate(uuidSchema, agentId);
+    } catch (e) {
+      if (e instanceof ValidationError) {
+        return NextResponse.json(
+          { code: "VALIDATION_ERROR", message: "Invalid ID format" },
+          { status: 400 }
+        );
+      }
+      throw e;
+    }
 
     // ── Verify agent exists and belongs to user ──
     const agent = await prisma.agent.findUnique({
@@ -101,6 +116,18 @@ export async function PATCH(
     const user = await getAuthUser(request);
     const { id: agentId } = await params;
 
+    try {
+      validate(uuidSchema, agentId);
+    } catch (e) {
+      if (e instanceof ValidationError) {
+        return NextResponse.json(
+          { code: "VALIDATION_ERROR", message: "Invalid ID format" },
+          { status: 400 }
+        );
+      }
+      throw e;
+    }
+
     // ── Verify agent exists and belongs to user ──
     const agent = await prisma.agent.findUnique({
       where: { id: agentId },
@@ -131,8 +158,12 @@ export async function PATCH(
       where: { agentId },
     });
 
+    const currentRules = (existing?.rules as { version?: number; tools?: Record<string, unknown> }) ?? DEFAULT_RULES;
     const mergedRules = rules
-      ? { ...((existing?.rules as Record<string, unknown>) ?? DEFAULT_RULES), ...rules }
+      ? {
+          version: rules.version ?? currentRules.version ?? 1,
+          tools: { ...currentRules.tools, ...rules.tools },
+        }
       : undefined;
 
     const permission = await prisma.permission.upsert({

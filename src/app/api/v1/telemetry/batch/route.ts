@@ -9,6 +9,9 @@ import {
   type BudgetAlert,
 } from "@/lib/budget";
 import { batchTelemetrySchema, validate, ValidationError, formatValidationErrors } from "@/lib/validation";
+import { rateLimit, RateLimitPresets } from "@/lib/rate-limit";
+
+const batchLimiter = rateLimit(RateLimitPresets.generous);
 
 // ──────────────────────────────────────────────
 // POST /api/v1/telemetry/batch
@@ -27,6 +30,9 @@ interface TelemetryEventInput {
 
 export async function POST(request: NextRequest) {
   try {
+    const limited = await batchLimiter(request);
+    if (limited) return limited;
+
     // ── Dual-mode auth: userToken (dashboard) or agentToken (SDK) ──
     let userId: string;
     let isAgentAuth = false;
@@ -103,6 +109,7 @@ export async function POST(request: NextRequest) {
       // Drop events whose keyId doesn't belong to this user
       for (let i = validEvents.length - 1; i >= 0; i--) {
         const e = validEvents[i];
+        if (!e) continue;
         if (e.keyId && !userKeyIds.has(e.keyId)) {
           validEvents.splice(i, 1);
         }
@@ -111,243 +118,251 @@ export async function POST(request: NextRequest) {
 
     let ingested = 0;
     const budgetAlerts: BudgetAlert[] = [];
+
     if (validEvents.length > 0) {
-      // B1/B3: load pricing once to compute per-event cost for budget tracking
-      const pricingMap =
-        validEvents.some((e) => e.eventType === "token_usage")
-          ? await loadPricingMap(prisma)
-          : new Map();
-
-      for (const event of validEvents) {
-        // B7: Use deterministic eventId for idempotent upsert
-        const eventId =
-          event.eventId ||
-          `${event.agentId}::${event.timestamp}::${event.eventType}::${String(event.payload?.tool || "unknown")}::${String(event.payload?.model || "unknown")}`;
-
-        // B1/B3/B4: accumulate cost + aggregates in a transaction so the
-        // telemetry row, the agent/key counters, and the hourly/daily rollups
-        // stay consistent even if one part fails.
-        const reportedAt = new Date(event.timestamp || Date.now());
-
-        // S11: Reject timestamps outside reasonable range
-        const now = Date.now();
-        const tsTime = reportedAt.getTime();
-        if (tsTime > now + 24 * 60 * 60 * 1000 || tsTime < now - 365 * 24 * 60 * 60 * 1000) {
-          // Skip events with future (>1d) or ancient (>1y) timestamps
-          continue;
-        }
-
-        const isTokenUsage = event.eventType === "token_usage";
-
-        await prisma.$transaction(async (tx) => {
-          // 1. Idempotent insert: check existence first so we can tell
-          //    new vs. replay. (Prisma's upsert returns a row either way,
-          //    so it can't signal "was this a fresh insert?".)
-          const existing = await tx.telemetryLog.findUnique({
-            where: { eventId },
-            select: { id: true },
-          });
-          if (existing) return; // replay — skip all downstream accounting
-
-          // S6: Catch P2002 (unique constraint violation) for concurrent duplicates
-          try {
-            await tx.telemetryLog.create({
-              data: {
-                eventId,
-                agentId: event.agentId,
-                keyId: event.keyId || null,
-                accountId: userId,
-                eventType: event.eventType as any,
-                payload: (event.payload || {}) as any,
-                reportedAt,
-              },
-            });
-          } catch (err: any) {
-            // P2002 = unique constraint violation — concurrent duplicate eventId
-            if (err?.code === "P2002") return; // treat as replay
-            throw err; // re-throw other errors
+      // S17: Pre-compute eventIds + filter out-of-range timestamps upfront
+      const now = Date.now();
+      const processed = validEvents
+        .map((event) => {
+          const eventId =
+            event.eventId ||
+            `${event.agentId}::${event.timestamp}::${event.eventType}::${String(event.payload?.tool || "unknown")}::${String(event.payload?.model || "unknown")}`;
+          const reportedAt = new Date(event.timestamp || Date.now());
+          const tsTime = reportedAt.getTime();
+          // S11: Skip events with future (>1d) or ancient (>1y) timestamps
+          if (tsTime > now + 24 * 60 * 60 * 1000 || tsTime < now - 365 * 24 * 60 * 60 * 1000) {
+            return null;
           }
+          return { event, eventId, reportedAt };
+        })
+        .filter((e): e is NonNullable<typeof e> => e !== null);
 
-          // B8: Record key_failover events in FailoverLog table
-          if (event.eventType === "key_failover") {
-            const payload = event.payload || {};
-            const fromKeyId = (payload.fromKeyId || payload.from || payload.keyId || "") as string;
-            const toKeyId = (payload.toKeyId || payload.to || "") as string;
-            const reason = (payload.reason || "unknown") as string;
+      if (processed.length > 0) {
+        // S17: Pre-filter replays in a single query (avoids N findUnique calls)
+        const existing = await prisma.telemetryLog.findMany({
+          where: { eventId: { in: processed.map((e) => e.eventId) } },
+          select: { eventId: true },
+        });
+        const existingIds = new Set(existing.map((e) => e.eventId));
+        const newEvents = processed.filter((e) => !existingIds.has(e.eventId));
 
-            if (fromKeyId && toKeyId) {
-              await tx.failoverLog
-                .create({
-                  data: {
-                    agentId: event.agentId,
-                    fromKeyId: fromKeyId || null,
-                    toKeyId: toKeyId || null,
-                    reason,
-                    triggeredAt: reportedAt,
-                  },
-                })
-                .catch(() => {
-                  // Non-critical: failover logging is best-effort
-                });
-            }
-          }
+        if (newEvents.length > 0) {
+          // B1/B3: load pricing once for the entire batch
+          const pricingMap =
+            newEvents.some((e) => e.event.eventType === "token_usage")
+              ? await loadPricingMap(prisma)
+              : new Map();
 
-          // B1/B2: update agent monthlySpent on token usage
-          if (isTokenUsage) {
-            const { cost, tokensIn, tokensOut } = computeEventCost(event.payload, pricingMap);
-
-            // S4: Use update return value (atomic) instead of read-then-write
-            // This eliminates the TOCTOU race on budget threshold detection
-            const updatedAgent = await tx.agent.update({
-              where: { id: event.agentId },
-              data: { monthlySpent: { increment: cost } },
-              select: {
-                monthlySpent: true,
-                monthlyBudget: true,
-                enabled: true,
-              },
-            });
-
-            const newSpent = Number(updatedAgent.monthlySpent);
-            const prevSpent = newSpent - cost;
-            const monthlyBudget = updatedAgent.monthlyBudget
-              ? Number(updatedAgent.monthlyBudget)
-              : null;
-            const wasEnabled = updatedAgent.enabled;
-
-            // B1: budget enforcement — 80% warning + 100% auto-disable.
-            if (monthlyBudget !== null && monthlyBudget > 0) {
-              const budgetResult = await enforceAgentBudget(tx, {
-                agentId: event.agentId,
-                accountId: userId,
-                prevSpent,
-                eventCost: cost,
-                monthlyBudget,
-                wasEnabled,
-                triggeredAt: reportedAt.toISOString(),
-              });
-
-              const alert = buildBudgetAlert(
-                {
-                  agentId: event.agentId,
-                  accountId: userId,
-                  prevSpent,
-                  newSpent,
-                  budget: monthlyBudget,
-                  triggeredAt: reportedAt.toISOString(),
-                },
-                budgetResult,
-              );
-              if (alert) budgetAlerts.push(alert);
-            }
-
-            // B3: key spend tracking — increment spent; decrement currentBalance
-            // S5: Use updateMany with gte filter to prevent negative balance
-            if (event.keyId) {
+          // S17: Process all new events in a single transaction
+          let batchIngested = 0;
+          await prisma.$transaction(async (tx) => {
+            for (const { event, eventId, reportedAt } of newEvents) {
+              // S6: Catch P2002 (unique constraint violation) for concurrent duplicates
               try {
-                const key = await tx.key.findUnique({
-                  where: { id: event.keyId },
-                  select: { currentBalance: true },
+                await tx.telemetryLog.create({
+                  data: {
+                    eventId,
+                    agentId: event.agentId,
+                    keyId: event.keyId || null,
+                    accountId: userId,
+                    eventType: event.eventType as any,
+                    payload: (event.payload || {}) as any,
+                    reportedAt,
+                  },
                 });
-                if (key) {
-                  if (key.currentBalance !== null) {
-                    // S5: Only decrement if balance is sufficient (atomic check)
-                    await tx.key.updateMany({
-                      where: {
-                        id: event.keyId,
-                        currentBalance: { gte: cost },
-                      },
+              } catch (err: any) {
+                if (err?.code === "P2002") continue; // concurrent duplicate — treat as replay
+                throw err;
+              }
+
+              // B8: Record key_failover events in FailoverLog table
+              if (event.eventType === "key_failover") {
+                const payload = event.payload || {};
+                const fromKeyId = (payload.fromKeyId || payload.from || "") as string;
+                const toKeyId = (payload.toKeyId || payload.to || "") as string;
+                const reason = (payload.reason || "unknown") as string;
+
+                if (fromKeyId && toKeyId) {
+                  await tx.failoverLog
+                    .create({
                       data: {
-                        spent: { increment: cost },
-                        currentBalance: { decrement: cost },
+                        agentId: event.agentId,
+                        fromKeyId: fromKeyId || null,
+                        toKeyId: toKeyId || null,
+                        reason,
+                        triggeredAt: reportedAt,
                       },
+                    })
+                    .catch(() => {
+                      // Non-critical: failover logging is best-effort
                     });
-                  } else {
-                    // Unlimited key — just track spend
-                    await tx.key.update({
+                }
+              }
+
+              const isTokenUsage = event.eventType === "token_usage";
+
+              // B1/B2: update agent monthlySpent on token usage
+              if (isTokenUsage) {
+                const { cost, tokensIn, tokensOut } = computeEventCost(event.payload, pricingMap);
+
+                // S4: Use update return value (atomic) instead of read-then-write
+                const updatedAgent = await tx.agent.update({
+                  where: { id: event.agentId },
+                  data: { monthlySpent: { increment: cost } },
+                  select: {
+                    monthlySpent: true,
+                    monthlyBudget: true,
+                    enabled: true,
+                  },
+                });
+
+                const newSpent = Number(updatedAgent.monthlySpent);
+                const prevSpent = newSpent - cost;
+                const monthlyBudget = updatedAgent.monthlyBudget
+                  ? Number(updatedAgent.monthlyBudget)
+                  : null;
+                const wasEnabled = updatedAgent.enabled;
+
+                // B1: budget enforcement — 80% warning + 100% auto-disable.
+                if (monthlyBudget !== null && monthlyBudget > 0) {
+                  const budgetResult = await enforceAgentBudget(tx, {
+                    agentId: event.agentId,
+                    accountId: userId,
+                    prevSpent,
+                    eventCost: cost,
+                    monthlyBudget,
+                    wasEnabled,
+                    triggeredAt: reportedAt.toISOString(),
+                  });
+
+                  const alert = buildBudgetAlert(
+                    {
+                      agentId: event.agentId,
+                      accountId: userId,
+                      prevSpent,
+                      newSpent,
+                      budget: monthlyBudget,
+                      triggeredAt: reportedAt.toISOString(),
+                    },
+                    budgetResult,
+                  );
+                  if (alert) budgetAlerts.push(alert);
+                }
+
+                // B3: key spend tracking — increment spent; decrement currentBalance
+                // S5: Use updateMany with gte filter to prevent negative balance
+                if (event.keyId) {
+                  try {
+                    const key = await tx.key.findUnique({
                       where: { id: event.keyId },
-                      data: { spent: { increment: cost } },
+                      select: { currentBalance: true },
                     });
+                    if (key) {
+                      if (key.currentBalance !== null) {
+                        const result = await tx.key.updateMany({
+                          where: {
+                            id: event.keyId,
+                            currentBalance: { gte: cost },
+                          },
+                          data: {
+                            spent: { increment: cost },
+                            currentBalance: { decrement: cost },
+                          },
+                        });
+                        if (result.count === 0) {
+                          await tx.key.update({
+                            where: { id: event.keyId },
+                            data: { spent: { increment: cost } },
+                          });
+                        }
+                      } else {
+                        await tx.key.update({
+                          where: { id: event.keyId },
+                          data: { spent: { increment: cost } },
+                        });
+                      }
+                    }
+                  } catch {
+                    // best-effort — key may have been deleted concurrently
                   }
                 }
-              } catch {
-                // best-effort — key may have been deleted concurrently
+
+                // B4: upsert hourly/daily aggregation tables
+                const hourBucket = new Date(reportedAt);
+                hourBucket.setUTCMinutes(0, 0, 0);
+                const dayBucket = new Date(reportedAt);
+                dayBucket.setUTCHours(0, 0, 0, 0);
+
+                await tx.telemetryHourly.upsert({
+                  where: { agentId_hour: { agentId: event.agentId, hour: hourBucket } },
+                  create: {
+                    agentId: event.agentId,
+                    hour: hourBucket,
+                    tokensInput: BigInt(tokensIn),
+                    tokensOutput: BigInt(tokensOut),
+                    cost,
+                  },
+                  update: {
+                    tokensInput: { increment: BigInt(tokensIn) },
+                    tokensOutput: { increment: BigInt(tokensOut) },
+                    cost: { increment: cost },
+                  },
+                });
+
+                await tx.telemetryDaily.upsert({
+                  where: { agentId_day: { agentId: event.agentId, day: dayBucket } },
+                  create: {
+                    agentId: event.agentId,
+                    day: dayBucket,
+                    tokensInput: BigInt(tokensIn),
+                    tokensOutput: BigInt(tokensOut),
+                    cost,
+                  },
+                  update: {
+                    tokensInput: { increment: BigInt(tokensIn) },
+                    tokensOutput: { increment: BigInt(tokensOut) },
+                    cost: { increment: cost },
+                  },
+                });
+              } else if (event.eventType === "tool_call") {
+                // B4: count tool calls in aggregates (no cost for bare tool_call)
+                const hourBucket = new Date(reportedAt);
+                hourBucket.setUTCMinutes(0, 0, 0);
+                const dayBucket = new Date(reportedAt);
+                dayBucket.setUTCHours(0, 0, 0, 0);
+
+                await tx.telemetryHourly.upsert({
+                  where: { agentId_hour: { agentId: event.agentId, hour: hourBucket } },
+                  create: { agentId: event.agentId, hour: hourBucket, toolCalls: 1 },
+                  update: { toolCalls: { increment: 1 } },
+                });
+                await tx.telemetryDaily.upsert({
+                  where: { agentId_day: { agentId: event.agentId, day: dayBucket } },
+                  create: { agentId: event.agentId, day: dayBucket, toolCalls: 1 },
+                  update: { toolCalls: { increment: 1 } },
+                });
               }
+
+              batchIngested++;
             }
+          });
+          ingested += batchIngested;
 
-            // B4: upsert hourly/daily aggregation tables
-            const hourBucket = new Date(reportedAt);
-            hourBucket.setUTCMinutes(0, 0, 0);
-            const dayBucket = new Date(reportedAt);
-            dayBucket.setUTCHours(0, 0, 0, 0);
-
-            await tx.telemetryHourly.upsert({
-              where: { agentId_hour: { agentId: event.agentId, hour: hourBucket } },
-              create: {
-                agentId: event.agentId,
-                hour: hourBucket,
-                tokensInput: BigInt(tokensIn),
-                tokensOutput: BigInt(tokensOut),
-                cost,
-              },
-              update: {
-                tokensInput: { increment: BigInt(tokensIn) },
-                tokensOutput: { increment: BigInt(tokensOut) },
-                cost: { increment: cost },
-              },
-            });
-
-            await tx.telemetryDaily.upsert({
-              where: { agentId_day: { agentId: event.agentId, day: dayBucket } },
-              create: {
-                agentId: event.agentId,
-                day: dayBucket,
-                tokensInput: BigInt(tokensIn),
-                tokensOutput: BigInt(tokensOut),
-                cost,
-              },
-              update: {
-                tokensInput: { increment: BigInt(tokensIn) },
-                tokensOutput: { increment: BigInt(tokensOut) },
-                cost: { increment: cost },
-              },
-            });
-          } else if (event.eventType === "tool_call") {
-            // B4: count tool calls in aggregates (no cost for bare tool_call)
-            const hourBucket = new Date(reportedAt);
-            hourBucket.setUTCMinutes(0, 0, 0);
-            const dayBucket = new Date(reportedAt);
-            dayBucket.setUTCHours(0, 0, 0, 0);
-
-            await tx.telemetryHourly.upsert({
-              where: { agentId_hour: { agentId: event.agentId, hour: hourBucket } },
-              create: { agentId: event.agentId, hour: hourBucket, toolCalls: 1 },
-              update: { toolCalls: { increment: 1 } },
-            });
-            await tx.telemetryDaily.upsert({
-              where: { agentId_day: { agentId: event.agentId, day: dayBucket } },
-              create: { agentId: event.agentId, day: dayBucket, toolCalls: 1 },
-              update: { toolCalls: { increment: 1 } },
+          // ── Broadcast new events to SSE subscribers ──
+          for (const { event } of newEvents) {
+            const payload = event.payload || {};
+            broadcastEvent(userId, event.eventType, {
+              agentId: event.agentId,
+              tool: payload.tool as string | undefined,
+              model: payload.model as string | undefined,
+              timestamp: event.timestamp,
+              cost: payload.cost as number | undefined,
+              tokens: payload.tokens as number | undefined,
+              reason: payload.reason as string | undefined,
+              keyId: event.keyId,
             });
           }
-        });
-
-        ingested++;
-      }
-
-      // ── Broadcast each event to SSE subscribers ──
-      for (const event of validEvents) {
-        const payload = event.payload || {};
-        broadcastEvent(userId, event.eventType, {
-          agentId: event.agentId,
-          tool: payload.tool as string | undefined,
-          model: payload.model as string | undefined,
-          timestamp: event.timestamp,
-          cost: payload.cost as number | undefined,
-          tokens: payload.tokens as number | undefined,
-          reason: payload.reason as string | undefined,
-          keyId: event.keyId,
-        });
+        }
       }
     }
 

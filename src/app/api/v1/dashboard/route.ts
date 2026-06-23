@@ -165,7 +165,14 @@ export async function GET(request: NextRequest) {
       // Key overview — include currentBalance + spent for accurate display
       prisma.key.findMany({
         where: { accountId },
-        include: {
+        select: {
+          id: true,
+          keyLabel: true,
+          health: true,
+          currentBalance: true,
+          initialBalance: true,
+          spent: true,
+          burnRate: true,
           provider: { select: { name: true } },
         },
         orderBy: { createdAt: "desc" },

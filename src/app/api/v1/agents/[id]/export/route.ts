@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { prisma } from "@/lib/prisma";
 import { getAuthUser, ApiError } from "@/lib/auth";
+import { uuidSchema, validate, ValidationError } from "@/lib/validation";
 
 // ──────────────────────────────────────────────
 // Types
@@ -63,6 +64,18 @@ export async function GET(
   try {
     const user = await getAuthUser(request);
     const { id: agentId } = await params;
+
+    try {
+      validate(uuidSchema, agentId);
+    } catch (e) {
+      if (e instanceof ValidationError) {
+        return NextResponse.json(
+          { code: "VALIDATION_ERROR", message: "Invalid ID format" },
+          { status: 400 }
+        );
+      }
+      throw e;
+    }
 
     // ── Verify agent belongs to user ──────────
     const agent = await prisma.agent.findUnique({

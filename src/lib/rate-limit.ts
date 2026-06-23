@@ -206,9 +206,7 @@ export async function cleanupRateLimitStore(): Promise<void> {
  * Clear all rate limit entries (for testing).
  */
 export async function clearRateLimitStore(): Promise<void> {
-  if (store instanceof InMemoryStore) {
-    await store.clear();
-  }
+  await store.clear();
 }
 
 /**

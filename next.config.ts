@@ -14,7 +14,7 @@ if (missing.length > 0) {
 }
 
 const nextConfig: NextConfig = {
-  /* config options here */
+  poweredByHeader: false,
 };
 
 export default nextConfig;

@@ -31,7 +31,7 @@ function CustomTooltip({
     <div className="rounded-lg border border-slate-700 bg-slate-800 px-3 py-2 shadow-lg">
       <p className="text-xs text-slate-400">{label}</p>
       <p className="text-sm font-semibold text-slate-100">
-        {formatCurrency(payload[0].value)}
+        {formatCurrency(payload[0]?.value || 0)}
       </p>
     </div>
   );

@@ -41,7 +41,7 @@ export async function POST(request: NextRequest) {
     const account = await prisma.account.create({
       data: {
         email,
-        name: name || email.split("@")[0],
+        name: name || email.split("@")[0]!,
         plan: "free",
         passwordHash: hashed,
       },

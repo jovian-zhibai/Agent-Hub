@@ -2,6 +2,10 @@ import { NextRequest, NextResponse } from "next/server";
 import { prisma } from "@/lib/prisma";
 import { getAuthUser, ApiError } from "@/lib/auth";
 import { decryptKey } from "@/lib/crypto";
+import { rateLimit, RateLimitPresets } from "@/lib/rate-limit";
+import { uuidSchema, validate, ValidationError } from "@/lib/validation";
+
+const discoverLimiter = rateLimit(RateLimitPresets.veryStrict);
 
 // ──────────────────────────────────────────────
 // Types
@@ -40,8 +44,23 @@ export async function POST(
   { params }: { params: Promise<{ id: string }> }
 ) {
   try {
+    const limited = await discoverLimiter(request);
+    if (limited) return limited;
+
     const user = await getAuthUser(request);
     const { id } = await params;
+
+    try {
+      validate(uuidSchema, id);
+    } catch (e) {
+      if (e instanceof ValidationError) {
+        return NextResponse.json(
+          { code: "VALIDATION_ERROR", message: "Invalid ID format" },
+          { status: 400 }
+        );
+      }
+      throw e;
+    }
 
     // ── Step 1: Verify key and load provider ──
     const key = await prisma.key.findUnique({
@@ -132,26 +151,24 @@ export async function POST(
       const normalized = normalizeModelName(rawName);
       const protocol = key.protocol;
 
-      // 3a: Try database match
-      let pricing: PricingMatch | null = await matchFromDatabase(
-        provider.name,
-        normalized
-      );
+      // 3a-3d: Try sources in order and track which matched
+      let pricing: PricingMatch | null = null;
+      let pricingSource = "unknown";
 
-      // 3b: Try LiteLLM
-      if (!pricing) {
+      pricing = await matchFromDatabase(provider.name, normalized);
+      if (pricing) {
+        pricingSource = "manual";
+      } else {
         pricing = await matchFromLiteLLM(normalized);
+        if (pricing) {
+          pricingSource = "litellm";
+        } else {
+          pricing = await matchFromOpenRouter(normalized);
+          if (pricing) {
+            pricingSource = "openrouter";
+          }
+        }
       }
-
-      // 3c: Try OpenRouter
-      if (!pricing) {
-        pricing = await matchFromOpenRouter(normalized);
-      }
-
-      // 3d: Determine pricingSource
-      const pricingSource = pricing
-        ? "litellm"
-        : "unknown";
 
       // ── Upsert to models table ───────────────
       const displayName = toDisplayName(rawName);

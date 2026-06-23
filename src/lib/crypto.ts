@@ -97,7 +97,12 @@ export function decryptKey(encrypted: string): string {
     }
 
     const [ivHex, encryptedHex, authTagHex] = parts;
-    
+    if (!ivHex || !encryptedHex || !authTagHex) {
+      throw new Error(
+        "Invalid encrypted key format. Expected 'iv:ciphertext:authTag'"
+      );
+    }
+
     const masterKey = getMasterKey();
     const iv = Buffer.from(ivHex, ENCODING);
     const authTag = Buffer.from(authTagHex, ENCODING);

@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { prisma } from "@/lib/prisma";
 import { getAuthUser, ApiError } from "@/lib/auth";
-import { updateKeyBindingsSchema, validate, ValidationError, formatValidationErrors } from "@/lib/validation";
+import { updateKeyBindingsSchema, validate, ValidationError, formatValidationErrors, uuidSchema } from "@/lib/validation";
 
 // ──────────────────────────────────────────────
 // Types
@@ -35,6 +35,18 @@ export async function GET(
   try {
     const user = await getAuthUser(request);
     const { id: agentId } = await params;
+
+    try {
+      validate(uuidSchema, agentId);
+    } catch (e) {
+      if (e instanceof ValidationError) {
+        return NextResponse.json(
+          { code: "VALIDATION_ERROR", message: "Invalid ID format" },
+          { status: 400 }
+        );
+      }
+      throw e;
+    }
 
     // ── Verify agent exists and belongs to user ──
     const agent = await prisma.agent.findUnique({
@@ -118,6 +130,18 @@ export async function PUT(
     const user = await getAuthUser(request);
     const { id: agentId } = await params;
 
+    try {
+      validate(uuidSchema, agentId);
+    } catch (e) {
+      if (e instanceof ValidationError) {
+        return NextResponse.json(
+          { code: "VALIDATION_ERROR", message: "Invalid ID format" },
+          { status: 400 }
+        );
+      }
+      throw e;
+    }
+
     // ── Verify agent exists and belongs to user ──
     const agent = await prisma.agent.findUnique({
       where: { id: agentId },
@@ -172,7 +196,7 @@ export async function PUT(
               agentId,
               keyId: b.keyId,
               priority: b.priority,
-              status: (b.status ?? "active") as "active" | "standby" | "depleted" | "failed",
+              status: b.status as "active" | "standby" | "depleted" | "failed",
             },
           })
         )

@@ -22,13 +22,13 @@ export const paginationSchema = z.object({
 
 export const loginSchema = z.object({
   email: z.string().email("Invalid email format"),
-  password: z.string().min(6, "Password must be at least 6 characters"),
+  password: z.string().min(8, "Password must be at least 8 characters"),
 });
 
 export const registerSchema = z.object({
   name: z.string().min(1, "Name is required").max(100),
   email: z.string().email("Invalid email format"),
-  password: z.string().min(6, "Password must be at least 6 characters"),
+  password: z.string().min(8, "Password must be at least 8 characters"),
   plan: z.enum(["free", "pro", "team"]).optional().default("free"),
 });
 
@@ -40,7 +40,7 @@ export const createAgentSchema = z.object({
   name: z.string().min(1, "Name is required").max(100),
   description: z.string().max(500).optional(),
   framework: z.enum(["opencode", "claude-code", "other"]),
-  machineId: z.string().min(1, "Machine ID is required"),
+  machineId: z.string().min(1, "Machine ID is required").max(100, "Machine ID too long"),
   projectName: z.string().max(200).optional(),
   projectPath: z.string().max(500).optional(),
   safetyMode: z.boolean().optional().default(false),
@@ -61,10 +61,10 @@ export const updateAgentSchema = z.object({
 // ──────────────────────────────────────────────
 
 export const createKeySchema = z.object({
-  providerId: z.string().min(1, "Provider ID is required"),
+  providerId: z.string().uuid("Invalid provider ID format"),
   protocol: z.string().min(1, "Protocol is required"),
   keyLabel: z.string().min(1, "Key label is required").max(100),
-  keyValue: z.string().min(1, "API key value is required"),
+  keyValue: z.string().min(1, "API key value is required").max(500, "API key value too long"),
   scope: z.enum(["personal", "workspace"]).optional().default("personal"),
   workspaceId: z.string().uuid().optional().nullable(),
   group: z.string().max(50).optional().nullable(),

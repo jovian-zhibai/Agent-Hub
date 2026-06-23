@@ -108,7 +108,7 @@ describe("Crypto Utilities", () => {
       
       // Tamper with the ciphertext
       const parts = encrypted.split(":");
-      parts[1] = parts[1].slice(0, -2) + "ff"; // Change last 2 chars
+      parts[1] = parts[1]!.slice(0, -2) + "ff"; // Change last 2 chars
       const tampered = parts.join(":");
 
       expect(() => decryptKey(tampered)).toThrow("Key decryption failed");

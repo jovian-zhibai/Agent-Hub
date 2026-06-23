@@ -6,9 +6,12 @@ export function cn(...inputs: ClassValue[]) {
 }
 
 export function formatCurrency(value: number): string {
+  if (value < 0) {
+    return "-$" + formatCurrency(-value);
+  }
   if (value < 0.01) return "$0.00";
-  if (value < 1) return `$${value.toFixed(4)}`;
   if (value < 1000) return `$${value.toFixed(2)}`;
+  if (value < 10000) return `$${value.toFixed(2)}`;
   return `$${(value / 1000).toFixed(1)}k`;
 }
 
@@ -19,10 +22,11 @@ export function formatNumber(value: number | undefined | null): string {
   return value.toLocaleString();
 }
 
-export function timeAgo(dateStr: string | null): string {
-  if (!dateStr) return "never";
+export function timeAgo(date: string | Date | null): string {
+  if (!date) return "never";
   const now = Date.now();
-  const then = new Date(dateStr).getTime();
+  const then = new Date(date).getTime();
+  if (isNaN(then)) return "invalid date";
   const diff = now - then;
   const minutes = Math.floor(diff / 60000);
   if (minutes < 1) return "just now";

@@ -10,6 +10,7 @@ import {
   Workflow,
   ChevronLeft,
   ChevronRight,
+  ScrollText,
   type LucideIcon,
 } from "lucide-react";
 import { useState } from "react";
@@ -24,6 +25,7 @@ interface NavItem {
 const navItems: NavItem[] = [
   { label: "Dashboard", href: "/", icon: LayoutDashboard },
   { label: "Keys", href: "/keys", icon: Key },
+  { label: "Audit Logs", href: "/audit-logs", icon: ScrollText },
   { label: "Settings", href: "/settings", icon: Settings },
 ];
 

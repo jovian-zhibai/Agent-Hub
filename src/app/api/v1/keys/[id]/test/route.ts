@@ -2,6 +2,10 @@ import { NextRequest, NextResponse } from "next/server";
 import { prisma } from "@/lib/prisma";
 import { getAuthUser, ApiError } from "@/lib/auth";
 import { testProviderKey } from "@/lib/provider-tester";
+import { rateLimit, RateLimitPresets } from "@/lib/rate-limit";
+import { uuidSchema, validate, ValidationError } from "@/lib/validation";
+
+const testLimiter = rateLimit(RateLimitPresets.strict);
 
 // ──────────────────────────────────────────────
 // POST /api/v1/keys/:id/test
@@ -13,8 +17,23 @@ export async function POST(
   { params }: { params: Promise<{ id: string }> }
 ) {
   try {
+    const limited = await testLimiter(request);
+    if (limited) return limited;
+
     const user = await getAuthUser(request);
     const { id } = await params;
+
+    try {
+      validate(uuidSchema, id);
+    } catch (e) {
+      if (e instanceof ValidationError) {
+        return NextResponse.json(
+          { code: "VALIDATION_ERROR", message: "Invalid ID format" },
+          { status: 400 }
+        );
+      }
+      throw e;
+    }
 
     // ── Fetch key with provider info ────────────
     const key = await prisma.key.findUnique({

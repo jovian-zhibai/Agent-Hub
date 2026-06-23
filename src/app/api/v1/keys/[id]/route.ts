@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { prisma } from "@/lib/prisma";
 import { getAuthUser, ApiError } from "@/lib/auth";
-import { updateKeySchema, validate, ValidationError, formatValidationErrors } from "@/lib/validation";
+import { updateKeySchema, validate, ValidationError, formatValidationErrors, uuidSchema } from "@/lib/validation";
 
 // ──────────────────────────────────────────────
 // GET /api/v1/keys/:id
@@ -16,10 +16,31 @@ export async function GET(
     const user = await getAuthUser(request);
     const { id } = await params;
 
+    try {
+      validate(uuidSchema, id);
+    } catch (e) {
+      if (e instanceof ValidationError) {
+        return NextResponse.json(
+          { code: "VALIDATION_ERROR", message: "Invalid ID format" },
+          { status: 400 }
+        );
+      }
+      throw e;
+    }
+
     // ── Verify key exists and belongs to user ──
     const existing = await prisma.key.findUnique({
       where: { id },
-      include: {
+      select: {
+        id: true,
+        accountId: true,
+        keyLabel: true,
+        providerId: true,
+        health: true,
+        scope: true,
+        initialBalance: true,
+        burnRate: true,
+        createdAt: true,
         provider: { select: { id: true, name: true, displayName: true } },
         keyBindings: { select: { agentId: true } },
       },
@@ -89,6 +110,18 @@ export async function PATCH(
   try {
     const user = await getAuthUser(request);
     const { id } = await params;
+
+    try {
+      validate(uuidSchema, id);
+    } catch (e) {
+      if (e instanceof ValidationError) {
+        return NextResponse.json(
+          { code: "VALIDATION_ERROR", message: "Invalid ID format" },
+          { status: 400 }
+        );
+      }
+      throw e;
+    }
 
     // ── Verify key exists and belongs to user ──
     const existing = await prisma.key.findUnique({
@@ -208,6 +241,18 @@ export async function DELETE(
     const user = await getAuthUser(request);
     const { id } = await params;
 
+    try {
+      validate(uuidSchema, id);
+    } catch (e) {
+      if (e instanceof ValidationError) {
+        return NextResponse.json(
+          { code: "VALIDATION_ERROR", message: "Invalid ID format" },
+          { status: 400 }
+        );
+      }
+      throw e;
+    }
+
     // ── Verify key exists and belongs to user ──
     const existing = await prisma.key.findUnique({
       where: { id },
@@ -228,19 +273,48 @@ export async function DELETE(
       );
     }
 
-    // S9: Audit key deletion (capture keyLabel before delete)
-    await prisma.auditLog.create({
-      data: {
-        accountId: user.id,
-        action: "key_deleted",
-        targetType: "key",
-        targetId: id,
-        details: { keyLabel: existing.keyLabel },
-      },
-    });
+    await prisma.$transaction(async (tx) => {
+      await tx.auditLog.create({
+        data: {
+          accountId: user.id,
+          action: "key_deleted",
+          targetType: "key",
+          targetId: id,
+          details: { keyLabel: existing.keyLabel },
+        },
+      });
 
-    // ── Delete key (cascades key_bindings) ──────
-    await prisma.key.delete({ where: { id } });
+      const activeBindings = await tx.keyBinding.findMany({
+        where: { keyId: id, status: "active" },
+        select: { agentId: true, id: true },
+      });
+
+      if (activeBindings.length > 0) {
+        for (const binding of activeBindings) {
+          const nextBinding = await tx.keyBinding.findFirst({
+            where: { agentId: binding.agentId, status: "standby" },
+            orderBy: { priority: "asc" },
+          });
+          if (nextBinding) {
+            await tx.keyBinding.update({
+              where: { id: nextBinding.id },
+              data: { status: "active" },
+            });
+            await tx.failoverLog.create({
+              data: {
+                agentId: binding.agentId,
+                fromKeyId: id,
+                toKeyId: nextBinding.keyId,
+                reason: "key_deleted",
+                triggeredAt: new Date(),
+              },
+            });
+          }
+        }
+      }
+
+      await tx.key.delete({ where: { id } });
+    });
 
     return new NextResponse(null, { status: 204 });
   } catch (error) {

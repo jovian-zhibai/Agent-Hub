@@ -1,4 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
+import { timingSafeEqual } from "crypto";
 import { prisma } from "@/lib/prisma";
 
 // ──────────────────────────────────────────────
@@ -38,7 +39,9 @@ export async function GET(request: NextRequest) {
     );
   }
 
-  if (authHeader !== `Bearer ${cronSecret}`) {
+  const expected = Buffer.from(`Bearer ${cronSecret}`, "utf8");
+  const actual = Buffer.from(authHeader ?? "", "utf8");
+  if (expected.length !== actual.length || !timingSafeEqual(expected, actual)) {
     return NextResponse.json(
       { code: "UNAUTHORIZED", message: "Invalid or missing authorization" },
       { status: 401 },

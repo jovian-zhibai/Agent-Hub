@@ -50,7 +50,20 @@ export async function GET(request: NextRequest) {
     // ── Fetch keys ────────────────────────────
     const keys = await prisma.key.findMany({
       where: where as any,
-      include: {
+      select: {
+        id: true,
+        keyLabel: true,
+        protocol: true,
+        keyPrefix: true,
+        scope: true,
+        group: true,
+        note: true,
+        health: true,
+        initialBalance: true,
+        burnRate: true,
+        lastTestedAt: true,
+        isActive: true,
+        createdAt: true,
         provider: { select: { id: true, name: true, displayName: true } },
         keyBindings: { select: { id: true } },
       },
@@ -163,26 +176,37 @@ export async function POST(request: NextRequest) {
       );
     }
 
-    // ── Create key ──────────────────────────
-    const key = await prisma.key.create({
-      data: {
-        accountId: user.id,
-        providerId: provider.id,
-        protocol,
-        keyLabel,
-        keyEncrypted: encryptedValue,
-        keyPrefix,
-        scope: (scope ?? "personal") as any,
-        group: group ?? null,
-        note: note ?? null,
-        initialBalance: initialBalance ?? null,
-        isActive: true,
-      },
-      include: {
-        provider: { select: { id: true, name: true, displayName: true } },
-        keyBindings: { select: { id: true } },
-      },
-    });
+    // ── Create key ──────────────────────────────
+    let key;
+    try {
+      key = await prisma.key.create({
+        data: {
+          accountId: user.id,
+          providerId: provider.id,
+          protocol,
+          keyLabel,
+          keyEncrypted: encryptedValue,
+          keyPrefix,
+          scope: (scope ?? "personal") as any,
+          group: group ?? null,
+          note: note ?? null,
+          initialBalance: initialBalance ?? null,
+          isActive: true,
+        },
+        include: {
+          provider: { select: { id: true, name: true, displayName: true } },
+          keyBindings: { select: { id: true } },
+        },
+      });
+    } catch (err: any) {
+      if (err?.code === "P2002") {
+        return NextResponse.json(
+          { code: "DUPLICATE", message: "Key with this label already exists" },
+          { status: 409 },
+        );
+      }
+      throw err;
+    }
 
     // S9: Audit key creation
     await prisma.auditLog.create({

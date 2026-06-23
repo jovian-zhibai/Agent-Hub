@@ -1,4 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
+import { timingSafeEqual } from "crypto";
 import { prisma } from "@/lib/prisma";
 
 // ──────────────────────────────────────────────
@@ -32,7 +33,9 @@ export async function GET(request: NextRequest) {
     );
   }
 
-  if (authHeader !== `Bearer ${cronSecret}`) {
+  const expected = Buffer.from(`Bearer ${cronSecret}`, "utf8");
+  const actual = Buffer.from(authHeader ?? "", "utf8");
+  if (expected.length !== actual.length || !timingSafeEqual(expected, actual)) {
     return NextResponse.json(
       { code: "UNAUTHORIZED", message: "Invalid or missing authorization" },
       { status: 401 },
@@ -47,12 +50,6 @@ export async function GET(request: NextRequest) {
       where: {},
       data: {
         monthlySpent: 0,
-        // Re-enable agents that were disabled by budget exhaustion.
-        // User-disabled agents (enabled=false set manually) are also
-        // re-enabled here — if the user wants to keep an agent off,
-        // they should set status="disabled" instead of enabled=false.
-        // This is a deliberate trade-off: monthly reset = clean slate.
-        enabled: true,
       },
     });
 

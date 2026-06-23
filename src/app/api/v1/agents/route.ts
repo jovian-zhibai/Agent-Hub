@@ -157,57 +157,30 @@ export async function POST(request: NextRequest) {
     const projectPath = data.projectPath || "";
     const projectName = data.projectName || "";
 
-    const existing = await prisma.agent.findFirst({
+    const agent = await prisma.agent.upsert({
       where: {
-        accountId: user.id,
-        projectPath: projectPath,
+        accountId_projectPath_name: {
+          accountId: user.id,
+          projectPath,
+          name: data.name,
+        },
+      },
+      update: {
+        machineId: data.machineId,
+        projectName,
+        projectPath,
+      },
+      create: {
         name: data.name,
+        framework: data.framework,
+        status: "running",
+        accountId: user.id,
+        machineId: data.machineId ?? null,
+        enabled: true,
+        projectName,
+        projectPath,
       },
     });
-
-    let agent;
-    if (existing) {
-      // B13: Don't overwrite status, enabled, or other admin-managed fields
-      const updateData: Record<string, unknown> = {};
-      if (data.machineId !== undefined) {
-        updateData.machineId = data.machineId;
-      } else if (existing.machineId) {
-        updateData.machineId = existing.machineId;
-      }
-      updateData.projectName = projectName || existing.projectName;
-      updateData.projectPath = projectPath || existing.projectPath;
-
-      agent = await prisma.agent.update({
-        where: { id: existing.id },
-        data: updateData,
-      });
-    } else {
-      agent = await prisma.agent.create({
-        data: {
-          name: data.name,
-          framework: data.framework,
-          status: "running",
-          accountId: user.id,
-          machineId: data.machineId ?? null,
-          enabled: true,
-          projectName: projectName,
-          projectPath: projectPath,
-        },
-      });
-    }
-
-    // ── Persist permissions if provided (connect sync) ──
-    if (body.permissions && Array.isArray(body.permissions)) {
-      const rules: Record<string, string> = {};
-      for (const p of body.permissions) {
-        rules[p.tool] = p.action;
-      }
-      await prisma.permission.upsert({
-        where: { agentId: agent.id },
-        update: { rules: rules as any, version: { increment: 1 } },
-        create: { agentId: agent.id, rules: rules as any, version: 1 },
-      });
-    }
 
     return NextResponse.json(
       {

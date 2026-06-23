@@ -2,7 +2,36 @@
 // Provider Tester — Test API key validity
 // ──────────────────────────────────────────────
 
+import { URL } from "url";
 import { decryptKey } from "./crypto";
+
+function isPrivateUrl(urlString: string): boolean {
+  try {
+    const url = new URL(urlString);
+    const hostname = url.hostname;
+
+    if (hostname === "localhost" || hostname === "127.0.0.1" || hostname === "::1") {
+      return true;
+    }
+
+    const ip = hostname.split(".").map(Number);
+    if (ip.length === 4) {
+      if (ip[0] === 10) return true;
+      if (ip[0] === 172 && ip[1]! >= 16 && ip[1]! <= 31) return true;
+      if (ip[0] === 192 && ip[1] === 168) return true;
+      if (ip[0] === 169 && ip[1] === 254) return true;
+      if (ip[0] === 0) return true;
+    }
+
+    if (hostname === "metadata.google.internal" || hostname === "metadata.aws.internal") {
+      return true;
+    }
+
+    return false;
+  } catch {
+    return true;
+  }
+}
 
 export interface TestResult {
   success: boolean;
@@ -46,6 +75,13 @@ export async function testProviderKey(
   protocol: string,
   baseUrl?: string
 ): Promise<TestResult> {
+  if (baseUrl && isPrivateUrl(baseUrl)) {
+    return {
+      success: false,
+      health: "invalid",
+      message: "Blocked: base URL points to a private or internal address",
+    };
+  }
   try {
     // Decrypt the key
     const apiKey = decryptKey(encryptedKey);

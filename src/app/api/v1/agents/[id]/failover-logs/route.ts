@@ -1,6 +1,13 @@
 import { NextRequest, NextResponse } from "next/server";
 import { prisma } from "@/lib/prisma";
 import { getAuthUser, ApiError } from "@/lib/auth";
+import {
+  uuidSchema,
+  paginationSchema,
+  validate,
+  ValidationError,
+  formatValidationErrors,
+} from "@/lib/validation";
 
 // ──────────────────────────────────────────────
 // GET /api/v1/agents/:id/failover-logs
@@ -14,6 +21,18 @@ export async function GET(
   try {
     const user = await getAuthUser(request);
     const { id } = await params;
+
+    try {
+      validate(uuidSchema, id);
+    } catch (e) {
+      if (e instanceof ValidationError) {
+        return NextResponse.json(
+          { code: "VALIDATION_ERROR", message: "Invalid ID format" },
+          { status: 400 }
+        );
+      }
+      throw e;
+    }
 
     // ── Verify agent ownership ────────────────
     const agent = await prisma.agent.findUnique({
@@ -35,15 +54,27 @@ export async function GET(
       );
     }
 
-    // ── Fetch failover logs ───────────────────
-    const failoverLogs = await prisma.failoverLog.findMany({
-      where: { agentId: id },
-      include: {
-        fromKey: { select: { id: true, keyLabel: true } },
-        toKey: { select: { id: true, keyLabel: true } },
-      },
-      orderBy: { triggeredAt: "desc" },
+    // ── Parse pagination params ────────────────
+    const { searchParams } = new URL(request.url);
+    const { page, limit } = validate(paginationSchema, {
+      page: searchParams.get("page") ?? undefined,
+      limit: searchParams.get("limit") ?? undefined,
     });
+
+    // ── Fetch failover logs (paginated) ────────
+    const [failoverLogs, total] = await Promise.all([
+      prisma.failoverLog.findMany({
+        where: { agentId: id },
+        include: {
+          fromKey: { select: { id: true, keyLabel: true } },
+          toKey: { select: { id: true, keyLabel: true } },
+        },
+        orderBy: { triggeredAt: "desc" },
+        skip: (page - 1) * limit,
+        take: limit,
+      }),
+      prisma.failoverLog.count({ where: { agentId: id } }),
+    ]);
 
     const logs = failoverLogs.map((fl) => ({
       id: fl.id,
@@ -53,8 +84,17 @@ export async function GET(
       reason: fl.reason,
     }));
 
-    return NextResponse.json({ logs }, { status: 200 });
+    return NextResponse.json({
+      logs,
+      pagination: { page, limit, total, totalPages: Math.ceil(total / limit) },
+    }, { status: 200 });
   } catch (error) {
+    if (error instanceof ValidationError) {
+      return NextResponse.json(
+        { code: "VALIDATION_ERROR", message: formatValidationErrors(error.errors) },
+        { status: 400 }
+      );
+    }
     if (error instanceof ApiError) {
       return NextResponse.json(
         { code: error.name === "AuthError" ? "AUTH_ERROR" : "API_ERROR", message: error.message },

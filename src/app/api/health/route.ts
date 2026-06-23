@@ -22,7 +22,9 @@ export async function GET() {
 
     return NextResponse.json(status, { status: 200 });
   } catch (error) {
-    const errorMessage = error instanceof Error ? error.message : String(error);
+    const errorMessage = process.env.NODE_ENV === "production"
+      ? "Database connection failed"
+      : error instanceof Error ? error.message : String(error);
 
     const status = {
       status: "unhealthy",
