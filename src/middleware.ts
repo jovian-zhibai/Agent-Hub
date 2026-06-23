@@ -20,8 +20,8 @@ function getCorsOrigin(request: NextRequest): string | null {
   const origin = request.headers.get("origin") || "";
 
   if (NODE_ENV !== "production") {
-    // Development: allow all origins for local dev
-    return "*";
+    // Development: reflect request origin (cannot use "*" with credentials)
+    return origin || "*";
   }
 
   // Production: only allow whitelisted origins
@@ -47,6 +47,7 @@ export function middleware(request: NextRequest) {
       status: 204,
       headers: {
         "Access-Control-Allow-Origin": corsOrigin,
+        "Access-Control-Allow-Credentials": "true",
         "Access-Control-Allow-Methods": "GET, POST, PATCH, DELETE, OPTIONS",
         "Access-Control-Allow-Headers": "Content-Type, Authorization",
         "Access-Control-Max-Age": "86400",
@@ -60,6 +61,7 @@ export function middleware(request: NextRequest) {
   // disallowed origins so the browser blocks the response.
   if (corsOrigin !== null) {
     response.headers.set("Access-Control-Allow-Origin", corsOrigin);
+    response.headers.set("Access-Control-Allow-Credentials", "true");
     response.headers.set("Access-Control-Allow-Methods", "GET, POST, PATCH, DELETE, OPTIONS");
     response.headers.set("Access-Control-Allow-Headers", "Content-Type, Authorization");
   }

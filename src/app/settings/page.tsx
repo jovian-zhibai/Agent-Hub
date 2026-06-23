@@ -204,7 +204,7 @@ export default function SettingsPage() {
                             </td>
                             <td className="py-2.5 pr-4">
                               <span className="text-slate-400">
-                                {model.provider?.displayName || model.provider?.name || "—"}
+                                {model.provider?.name || "—"}
                               </span>
                             </td>
                             <td className="py-2.5 pr-4 text-right text-slate-400">

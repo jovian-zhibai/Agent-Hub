@@ -91,7 +91,7 @@ export default function AuditLogsPage() {
     if (action) params.set("action", action);
     if (targetType) params.set("targetType", targetType);
     if (from) params.set("from", new Date(from).toISOString());
-    if (to) params.set("to", new Date(to).toISOString());
+    if (to) params.set("to", new Date(to + "T23:59:59.999Z").toISOString());
     return params.toString();
   }, [page, limit, action, targetType, from, to]);
 

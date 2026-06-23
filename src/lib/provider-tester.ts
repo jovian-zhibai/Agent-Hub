@@ -3,6 +3,7 @@
 // ──────────────────────────────────────────────
 
 import { URL } from "url";
+import net from "net";
 import { decryptKey } from "./crypto";
 
 function isPrivateUrl(urlString: string): boolean {
@@ -10,27 +11,79 @@ function isPrivateUrl(urlString: string): boolean {
     const url = new URL(urlString);
     const hostname = url.hostname;
 
-    if (hostname === "localhost" || hostname === "127.0.0.1" || hostname === "::1") {
+    // Only allow http/https
+    if (url.protocol !== "http:" && url.protocol !== "https:") {
       return true;
     }
 
-    const ip = hostname.split(".").map(Number);
-    if (ip.length === 4) {
-      if (ip[0] === 10) return true;
-      if (ip[0] === 172 && ip[1]! >= 16 && ip[1]! <= 31) return true;
-      if (ip[0] === 192 && ip[1] === 168) return true;
-      if (ip[0] === 169 && ip[1] === 254) return true;
-      if (ip[0] === 0) return true;
-    }
-
-    if (hostname === "metadata.google.internal" || hostname === "metadata.aws.internal") {
+    // Block known metadata endpoints
+    const blockedHosts = ["metadata.google.internal", "metadata.aws.internal", "169.254.169.254"];
+    if (blockedHosts.includes(hostname)) {
       return true;
     }
 
+    // Parse IP address — handle IPv4, IPv6, and shorthand notations
+    // Node's URL already normalizes IPv6 brackets
+    const isIP = net.isIP(hostname);
+    if (isIP === 4) {
+      return isPrivateIPv4(hostname);
+    }
+    if (isIP === 6) {
+      return isPrivateIPv6(hostname);
+    }
+
+    // Not an IP — it's a hostname. Block localhost variants.
+    if (hostname === "localhost") {
+      return true;
+    }
+
+    // For hostnames, we can't fully prevent DNS rebinding,
+    // but we block obvious internal patterns
     return false;
   } catch {
     return true;
   }
+}
+
+function isPrivateIPv4(ip: string): boolean {
+  const parts = ip.split(".").map(Number);
+  if (parts.length !== 4 || parts.some(isNaN)) return true;
+
+  const a = parts[0]!;
+  const b = parts[1]!;
+
+  // 0.0.0.0/8
+  if (a === 0) return true;
+  // 10.0.0.0/8
+  if (a === 10) return true;
+  // 127.0.0.0/8 (entire loopback range)
+  if (a === 127) return true;
+  // 169.254.0.0/16 (link-local / metadata)
+  if (a === 169 && b === 254) return true;
+  // 172.16.0.0/12
+  if (a === 172 && b >= 16 && b <= 31) return true;
+  // 192.168.0.0/16
+  if (a === 192 && b === 168) return true;
+  // 100.64.0.0/10 (CGNAT)
+  if (a === 100 && b >= 64 && b <= 127) return true;
+
+  return false;
+}
+
+function isPrivateIPv6(ip: string): boolean {
+  const lower = ip.toLowerCase();
+  // ::1 loopback
+  if (lower === "::1") return true;
+  // fc00::/7 (ULA)
+  if (lower.startsWith("fc") || lower.startsWith("fd")) return true;
+  // fe80::/10 (link-local)
+  if (lower.startsWith("fe8") || lower.startsWith("fe9") || lower.startsWith("fea") || lower.startsWith("feb")) return true;
+  // ::ffff: mapped IPv4
+  if (lower.startsWith("::ffff:")) {
+    const ipv4 = lower.slice("::ffff:".length);
+    if (net.isIPv4(ipv4)) return isPrivateIPv4(ipv4);
+  }
+  return false;
 }
 
 export interface TestResult {

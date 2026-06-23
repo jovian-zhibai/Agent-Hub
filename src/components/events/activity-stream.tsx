@@ -47,6 +47,8 @@ export function ActivityStream({ maxItems = 50 }: { maxItems?: number }) {
   const [connected, setConnected] = useState(false);
   const eventSourceRef = useRef<EventSource | null>(null);
   const reconnectTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const maxItemsRef = useRef(maxItems);
+  maxItemsRef.current = maxItems;
 
   useEffect(() => {
     if (!token) return;
@@ -94,7 +96,7 @@ export function ActivityStream({ maxItems = 50 }: { maxItems?: number }) {
           try {
             const data = JSON.parse(e.data);
             setEvents((prev) =>
-              [{ ...data, id: crypto.randomUUID(), type }, ...prev].slice(0, maxItems),
+              [{ ...data, id: crypto.randomUUID(), type }, ...prev].slice(0, maxItemsRef.current),
             );
           } catch {
             // Ignore malformed data
@@ -121,7 +123,7 @@ export function ActivityStream({ maxItems = 50 }: { maxItems?: number }) {
       if (reconnectTimer.current) clearTimeout(reconnectTimer.current);
       if (eventSourceRef.current) eventSourceRef.current.close();
     };
-  }, [token, maxItems]);
+  }, [token]);
 
   return (
     <div>

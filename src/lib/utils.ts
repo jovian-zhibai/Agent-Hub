@@ -7,11 +7,10 @@ export function cn(...inputs: ClassValue[]) {
 
 export function formatCurrency(value: number): string {
   if (value < 0) {
-    return "-$" + formatCurrency(-value);
+    return "-" + formatCurrency(-value);
   }
   if (value < 0.01) return "$0.00";
   if (value < 1000) return `$${value.toFixed(2)}`;
-  if (value < 10000) return `$${value.toFixed(2)}`;
   return `$${(value / 1000).toFixed(1)}k`;
 }
 

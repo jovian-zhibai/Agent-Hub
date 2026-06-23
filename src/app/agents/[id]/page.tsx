@@ -310,13 +310,27 @@ function PermissionsTab({ agentId }: { agentId: string }) {
   const togglePermission = async (tool: string) => {
     if (!data) return;
     const toolRule = data.rules?.tools?.[tool];
-    const currentAction = toolRule?.allow ? "allow" : "deny";
-    const newAction = currentAction === "allow" ? "deny" : "allow";
+    const currentAction = toolRule?.allow ? "allow" : toolRule?.ask ? "ask" : "deny";
+    // Cycle: deny -> allow -> ask -> deny
+    const nextAction = currentAction === "deny" ? "allow" : currentAction === "allow" ? "ask" : "deny";
+
+    const buildRule = (action: string) =>
+      action === "allow"
+        ? { allow: true, deny: false }
+        : action === "ask"
+          ? { ask: true, allow: false, deny: false }
+          : { deny: true, allow: false };
 
     // Optimistic update
     setData((prev) => {
       if (!prev) return prev;
-      return { ...prev, rules: { ...prev.rules, tools: { ...prev.rules.tools, [tool]: newAction === "allow" ? { allow: true, deny: false } : { allow: false, deny: true } } } };
+      return {
+        ...prev,
+        rules: {
+          ...prev.rules,
+          tools: { ...prev.rules.tools, [tool]: buildRule(nextAction) },
+        },
+      };
     });
 
     setPendingTools((prev) => new Set(prev).add(tool));
@@ -325,7 +339,7 @@ function PermissionsTab({ agentId }: { agentId: string }) {
       await agents.updatePermissions(agentId, {
         rules: {
           tools: {
-            [tool]: newAction === "allow" ? { allow: true, deny: false } : { allow: false, deny: true },
+            [tool]: buildRule(nextAction),
           },
         },
       });
@@ -333,7 +347,13 @@ function PermissionsTab({ agentId }: { agentId: string }) {
       // Rollback on failure
       setData((prev) => {
         if (!prev) return prev;
-        return { ...prev, rules: { ...prev.rules, tools: { ...prev.rules.tools, [tool]: currentAction === "allow" ? { allow: true, deny: false } : { allow: false, deny: true } } } };
+        return {
+          ...prev,
+          rules: {
+            ...prev.rules,
+            tools: { ...prev.rules.tools, [tool]: buildRule(currentAction) },
+          },
+        };
       });
     } finally {
       setPendingTools((prev) => {
@@ -388,7 +408,7 @@ function PermissionsTab({ agentId }: { agentId: string }) {
         <div className="space-y-2">
           {allToolNames.map((tool) => {
             const toolRule = data?.rules?.tools?.[tool];
-            const action = toolRule?.allow ? "allow" : "deny";
+            const action = toolRule?.allow ? "allow" : toolRule?.ask ? "ask" : "deny";
             const isPending = pendingTools.has(tool);
             return (
               <div
@@ -403,7 +423,9 @@ function PermissionsTab({ agentId }: { agentId: string }) {
                     "px-3 py-1 rounded text-xs font-medium transition-colors cursor-pointer border",
                     action === "allow"
                       ? "bg-green-600/20 text-green-400 border-green-700/50 hover:bg-green-600/30"
-                      : "bg-red-600/20 text-red-400 border-red-700/50 hover:bg-red-600/30",
+                      : action === "ask"
+                        ? "bg-amber-600/20 text-amber-400 border-amber-700/50 hover:bg-amber-600/30"
+                        : "bg-red-600/20 text-red-400 border-red-700/50 hover:bg-red-600/30",
                     isPending && "opacity-50 cursor-not-allowed"
                   )}
                 >
@@ -411,6 +433,8 @@ function PermissionsTab({ agentId }: { agentId: string }) {
                     <Loader2 className="h-3 w-3 animate-spin inline" />
                   ) : action === "allow" ? (
                     "Allow"
+                  ) : action === "ask" ? (
+                    "Ask"
                   ) : (
                     "Deny"
                   )}

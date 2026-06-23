@@ -234,7 +234,10 @@ export interface KeyUsageResponse {
   key: {
     id: string;
     keyLabel: string;
-    provider: { name: string; displayName: string };
+    provider: { name: string };
+    health: string;
+    initialBalance: number | null;
+    burnRate: number | null;
   };
   usage: {
     totalCost: number;
@@ -281,18 +284,21 @@ export interface FailoverLog {
 
 export interface FailoverLogsResponse {
   logs: FailoverLog[];
+  pagination: { page: number; limit: number; total: number; totalPages: number };
 }
 
 export interface Model {
   id: string;
+  provider: { id: string; name: string };
+  defaultProtocol: string;
+  supportedProtocols: string[];
   modelName: string;
   displayName: string;
-  providerId: string;
-  provider?: { id: string; name: string; displayName?: string };
+  pricingInput: number;
+  pricingOutput: number;
+  pricingAsOf: string | null;
+  pricingSource: string;
   isActive: boolean;
-  pricingInput?: number;
-  pricingOutput?: number;
-  pricingSource?: string;
 }
 
 // ── SWR fetcher ───────────────────────────────
@@ -322,6 +328,9 @@ export const fetcher = async (url: string, _isRetry = false): Promise<any> => {
       if (refreshRes.ok) {
         const { accessToken: newToken } =
           await refreshRes.json();
+        if (typeof newToken !== "string" || !newToken) {
+          throw new Error("Invalid refresh response");
+        }
         localStorage.setItem("auth_token", newToken);
         // Retry the original request with the new token
         return fetcher(url, true);

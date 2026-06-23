@@ -53,15 +53,23 @@ export async function GET(request: NextRequest) {
     const createdAt: Record<string, Date> = {};
     if (from) {
       const fromDate = new Date(from);
-      if (!isNaN(fromDate.getTime())) {
-        createdAt.gte = fromDate;
+      if (isNaN(fromDate.getTime())) {
+        return NextResponse.json(
+          { code: "VALIDATION_ERROR", message: "Invalid 'from' date format" },
+          { status: 400 }
+        );
       }
+      createdAt.gte = fromDate;
     }
     if (to) {
       const toDate = new Date(to);
-      if (!isNaN(toDate.getTime())) {
-        createdAt.lte = toDate;
+      if (isNaN(toDate.getTime())) {
+        return NextResponse.json(
+          { code: "VALIDATION_ERROR", message: "Invalid 'to' date format" },
+          { status: 400 }
+        );
       }
+      createdAt.lte = toDate;
     }
     if (Object.keys(createdAt).length > 0) {
       where.createdAt = createdAt;

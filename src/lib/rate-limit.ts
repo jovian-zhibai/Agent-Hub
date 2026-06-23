@@ -260,14 +260,25 @@ export function createRateLimitedHandler(
   };
 }
 
+let cleanupTimer: NodeJS.Timeout | null = null;
+
 /**
  * Start a cleanup interval to remove expired entries.
  * Call this once when the application starts.
  */
 export function startRateLimitCleanup(intervalMs = 5 * 60 * 1000): NodeJS.Timeout {
-  return setInterval(async () => {
+  if (cleanupTimer) clearInterval(cleanupTimer);
+  cleanupTimer = setInterval(async () => {
     await cleanupRateLimitStore();
   }, intervalMs);
+  return cleanupTimer;
+}
+
+export function stopRateLimitCleanup(): void {
+  if (cleanupTimer) {
+    clearInterval(cleanupTimer);
+    cleanupTimer = null;
+  }
 }
 
 // S8: Auto-start cleanup on module load (skip in test environment)

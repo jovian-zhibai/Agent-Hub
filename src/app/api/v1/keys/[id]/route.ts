@@ -305,7 +305,7 @@ export async function DELETE(
                 agentId: binding.agentId,
                 fromKeyId: id,
                 toKeyId: nextBinding.keyId,
-                reason: "key_deleted",
+                reason: `key_deleted:${existing.keyLabel}`,
                 triggeredAt: new Date(),
               },
             });

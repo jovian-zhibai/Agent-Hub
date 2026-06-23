@@ -1,7 +1,7 @@
 "use client";
 
 import { useState, useEffect } from "react";
-import { useKeys, useKeyUsage } from "@/lib/hooks";
+import { useKeys } from "@/lib/hooks";
 import { keys, type Key, type KeyUsageResponse } from "@/lib/api";
 import { Badge } from "@/components/ui/badge";
 import { Toggle } from "@/components/ui/toggle";
@@ -151,6 +151,7 @@ function AddKeyModal({ open, onClose, onSuccess }: AddKeyModalProps) {
 
   // Step 3 state
   const [finalError, setFinalError] = useState<string | null>(null);
+  const [discoverError, setDiscoverError] = useState<string | null>(null);
 
   useEffect(() => {
     if (!open) {
@@ -168,6 +169,7 @@ function AddKeyModal({ open, onClose, onSuccess }: AddKeyModalProps) {
       setCreatedKeyId(null);
       setDiscoverResult(null);
       setFinalError(null);
+      setDiscoverError(null);
     }
   }, [open]);
 
@@ -182,7 +184,10 @@ function AddKeyModal({ open, onClose, onSuccess }: AddKeyModalProps) {
   const handleCreateAndDiscover = async () => {
     setLoading(true);
     setError(null);
+    setDiscoverError(null);
+    let createdKeyId: string | null = null;
     try {
+      setStep(2);
       const payload: Record<string, unknown> = {
         provider: providerName,
         keyValue: apiKey,
@@ -196,12 +201,10 @@ function AddKeyModal({ open, onClose, onSuccess }: AddKeyModalProps) {
       if (initialBalance) payload.initialBalance = parseFloat(initialBalance);
 
       const createRes = await keys.create(payload);
-      const keyId = createRes.key.id;
-      setCreatedKeyId(keyId);
+      createdKeyId = createRes.key.id;
+      setCreatedKeyId(createdKeyId);
 
-      setStep(2);
-
-      const discRes = await keys.discoverModels(keyId);
+      const discRes = await keys.discoverModels(createdKeyId);
       setDiscoverResult({
         matched: discRes.matched ?? discRes.models.length,
         unmatched: discRes.unmatched ?? 0,
@@ -210,7 +213,15 @@ function AddKeyModal({ open, onClose, onSuccess }: AddKeyModalProps) {
 
       setStep(3);
     } catch (err) {
-      setError(err instanceof Error ? err.message : "Failed to create key");
+      if (createdKeyId) {
+        // Key was created but discover failed — go to final step with warning
+        setDiscoverError(err instanceof Error ? err.message : "Model discovery failed");
+        setStep(3);
+      } else {
+        // Create failed — go back to step 1
+        setError(err instanceof Error ? err.message : "Failed to create key");
+        setStep(1);
+      }
     } finally {
       setLoading(false);
     }
@@ -432,20 +443,28 @@ function AddKeyModal({ open, onClose, onSuccess }: AddKeyModalProps) {
           )}
 
           {/* Step 3: Result */}
-          {step === 3 && discoverResult && (
+          {step === 3 && (
             <div className="space-y-4">
               <div className="flex items-center gap-3 rounded-lg bg-emerald-900/20 border border-emerald-800/40 px-4 py-3">
                 <CheckCircle2 className="h-5 w-5 shrink-0 text-emerald-400" />
                 <div>
                   <p className="text-sm font-medium text-emerald-300">Key created successfully</p>
                   <p className="text-xs text-slate-400">
-                    {discoverResult.matched} models matched
-                    {discoverResult.unmatched > 0 && `, ${discoverResult.unmatched} unmatched`}
+                    {discoverResult
+                      ? `${discoverResult.matched} models matched${discoverResult.unmatched > 0 ? `, ${discoverResult.unmatched} unmatched` : ""}`
+                      : "Model discovery skipped"}
                   </p>
                 </div>
               </div>
 
-              {discoverResult.models.length > 0 && (
+              {discoverError && (
+                <div className="flex items-center gap-2 rounded-lg bg-amber-900/20 border border-amber-800/40 px-3 py-2 text-xs text-amber-300">
+                  <AlertCircle className="h-3.5 w-3.5 shrink-0" />
+                  {discoverError}
+                </div>
+              )}
+
+              {discoverResult && discoverResult.models.length > 0 && (
                 <div className="space-y-1.5">
                   <p className="text-xs font-medium text-slate-400">Discovered Models</p>
                   <div className="max-h-40 space-y-1 overflow-y-auto">

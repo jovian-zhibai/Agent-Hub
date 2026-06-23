@@ -38,20 +38,31 @@ export async function POST(request: NextRequest) {
 
     // ── Create account ─────────────────────────
     const hashed = await hashPassword(password);
-    const account = await prisma.account.create({
-      data: {
-        email,
-        name: name || email.split("@")[0]!,
-        plan: "free",
-        passwordHash: hashed,
-      },
-      select: {
-        id: true,
-        email: true,
-        name: true,
-        tokenVersion: true,
-      },
-    });
+    let account;
+    try {
+      account = await prisma.account.create({
+        data: {
+          email,
+          name: name || email.split("@")[0]!,
+          plan: "free",
+          passwordHash: hashed,
+        },
+        select: {
+          id: true,
+          email: true,
+          name: true,
+          tokenVersion: true,
+        },
+      });
+    } catch (err: unknown) {
+      if (err && typeof err === "object" && "code" in err && err.code === "P2002") {
+        return NextResponse.json(
+          { code: "CONFLICT", message: "Email already registered" },
+          { status: 409 }
+        );
+      }
+      throw err;
+    }
 
     // ── Generate tokens ────────────────────────
     const { accessToken, refreshToken } = generateTokens({

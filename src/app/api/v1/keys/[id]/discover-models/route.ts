@@ -475,18 +475,30 @@ async function matchFromDatabase(
   }
 }
 
+// ──────────────────────────────────────────────
+// Pricing data source caches (5-minute TTL)
+// Avoids re-fetching LiteLLM / OpenRouter JSON for
+// every model name in a discover batch.
+// ──────────────────────────────────────────────
+
+let litellmCache: Record<string, { input: number; output: number }> | null = null;
+let litellmCacheTime = 0;
+let openrouterCache: Map<string, { input: number; output: number }> | null = null;
+let openrouterCacheTime = 0;
+const CACHE_TTL = 5 * 60 * 1000; // 5 minutes
+
 /**
- * Try matching pricing from the LiteLLM pricing JSON.
- * LiteLLM returns cost per token; we convert to cost per 1M tokens.
+ * Fetch (and cache) the LiteLLM pricing JSON, pre-converted to
+ * cost per 1M tokens. Returns null on any failure.
  */
-async function matchFromLiteLLM(
-  modelName: string
-): Promise<PricingMatch | null> {
+async function getLiteLLMCache(): Promise<Record<string, { input: number; output: number }> | null> {
+  if (litellmCache && Date.now() - litellmCacheTime < CACHE_TTL) {
+    return litellmCache;
+  }
   try {
     const resp = await fetchWithTimeout(
       "https://raw.githubusercontent.com/BerriAI/litellm/main/model_prices_and_context_window.json"
     );
-
     if (!resp.ok) return null;
 
     const data = (await resp.json()) as Record<
@@ -497,53 +509,39 @@ async function matchFromLiteLLM(
       }
     >;
 
-    // Exact match first
-    if (data[modelName]) {
-      const entry = data[modelName];
-      if (
-        entry.input_cost_per_token != null &&
-        entry.output_cost_per_token != null
-      ) {
-        return {
-          input: entry.input_cost_per_token * 1_000_000,
-          output: entry.output_cost_per_token * 1_000_000,
-        };
-      }
-    }
-
-    // Fuzzy match: look for a key containing or contained by modelName
+    const map: Record<string, { input: number; output: number }> = {};
     for (const [key, entry] of Object.entries(data)) {
       if (
         entry.input_cost_per_token != null &&
         entry.output_cost_per_token != null
       ) {
-        if (key.includes(modelName) || modelName.includes(key)) {
-          return {
-            input: entry.input_cost_per_token * 1_000_000,
-            output: entry.output_cost_per_token * 1_000_000,
-          };
-        }
+        map[key] = {
+          input: entry.input_cost_per_token * 1_000_000,
+          output: entry.output_cost_per_token * 1_000_000,
+        };
       }
     }
-
-    return null;
+    litellmCache = map;
+    litellmCacheTime = Date.now();
+    return litellmCache;
   } catch {
     return null;
   }
 }
 
 /**
- * Try matching pricing from the OpenRouter models API.
- * OpenRouter returns cost per token; we convert to cost per 1M tokens.
+ * Fetch (and cache) the OpenRouter models API, pre-converted to
+ * cost per 1M tokens and keyed by normalized model id.
+ * Returns null on any failure.
  */
-async function matchFromOpenRouter(
-  modelName: string
-): Promise<PricingMatch | null> {
+async function getOpenRouterCache(): Promise<Map<string, { input: number; output: number }> | null> {
+  if (openrouterCache && Date.now() - openrouterCacheTime < CACHE_TTL) {
+    return openrouterCache;
+  }
   try {
     const resp = await fetchWithTimeout(
       "https://openrouter.ai/api/v1/models"
     );
-
     if (!resp.ok) return null;
 
     const data = (await resp.json()) as {
@@ -555,22 +553,66 @@ async function matchFromOpenRouter(
 
     if (!data.data || !Array.isArray(data.data)) return null;
 
+    const map = new Map<string, { input: number; output: number }>();
     for (const model of data.data) {
-      const normalized = model.id.toLowerCase();
-      if (normalized.includes(modelName) || modelName.includes(normalized)) {
-        const prompt = parseFloat(model.pricing.prompt);
-        const completion = parseFloat(model.pricing.completion);
-        if (!isNaN(prompt) && !isNaN(completion)) {
-          return {
-            input: prompt * 1_000_000,
-            output: completion * 1_000_000,
-          };
-        }
+      const prompt = parseFloat(model.pricing.prompt);
+      const completion = parseFloat(model.pricing.completion);
+      if (!isNaN(prompt) && !isNaN(completion)) {
+        map.set(model.id.toLowerCase(), {
+          input: prompt * 1_000_000,
+          output: completion * 1_000_000,
+        });
       }
     }
-
-    return null;
+    openrouterCache = map;
+    openrouterCacheTime = Date.now();
+    return openrouterCache;
   } catch {
     return null;
   }
+}
+
+/**
+ * Try matching pricing from the LiteLLM pricing JSON.
+ * LiteLLM returns cost per token; the cache stores cost per 1M tokens.
+ */
+async function matchFromLiteLLM(
+  modelName: string
+): Promise<PricingMatch | null> {
+  const cache = await getLiteLLMCache();
+  if (!cache) return null;
+
+  // Exact match first
+  const exact = cache[modelName];
+  if (exact) {
+    return { input: exact.input, output: exact.output };
+  }
+
+  // Fuzzy match: look for a key containing or contained by modelName
+  for (const [key, entry] of Object.entries(cache)) {
+    if (key.includes(modelName) || modelName.includes(key)) {
+      return { input: entry.input, output: entry.output };
+    }
+  }
+
+  return null;
+}
+
+/**
+ * Try matching pricing from the OpenRouter models API.
+ * OpenRouter returns cost per token; the cache stores cost per 1M tokens.
+ */
+async function matchFromOpenRouter(
+  modelName: string
+): Promise<PricingMatch | null> {
+  const cache = await getOpenRouterCache();
+  if (!cache) return null;
+
+  for (const [normalized, entry] of cache.entries()) {
+    if (normalized.includes(modelName) || modelName.includes(normalized)) {
+      return { input: entry.input, output: entry.output };
+    }
+  }
+
+  return null;
 }

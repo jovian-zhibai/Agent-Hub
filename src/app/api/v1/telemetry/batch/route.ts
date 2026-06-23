@@ -155,6 +155,13 @@ export async function POST(request: NextRequest) {
 
           // S17: Process all new events in a single transaction
           let batchIngested = 0;
+          const pendingFailoverLogs: Array<{
+            agentId: string;
+            fromKeyId: string | null;
+            toKeyId: string | null;
+            reason: string;
+            triggeredAt: Date;
+          }> = [];
           await prisma.$transaction(async (tx) => {
             for (const { event, eventId, reportedAt } of newEvents) {
               // S6: Catch P2002 (unique constraint violation) for concurrent duplicates
@@ -183,19 +190,13 @@ export async function POST(request: NextRequest) {
                 const reason = (payload.reason || "unknown") as string;
 
                 if (fromKeyId && toKeyId) {
-                  await tx.failoverLog
-                    .create({
-                      data: {
-                        agentId: event.agentId,
-                        fromKeyId: fromKeyId || null,
-                        toKeyId: toKeyId || null,
-                        reason,
-                        triggeredAt: reportedAt,
-                      },
-                    })
-                    .catch(() => {
-                      // Non-critical: failover logging is best-effort
-                    });
+                  pendingFailoverLogs.push({
+                    agentId: event.agentId,
+                    fromKeyId: fromKeyId || null,
+                    toKeyId: toKeyId || null,
+                    reason,
+                    triggeredAt: reportedAt,
+                  });
                 }
               }
 
@@ -347,6 +348,15 @@ export async function POST(request: NextRequest) {
             }
           });
           ingested += batchIngested;
+
+          // Create failover logs outside the transaction (best-effort)
+          for (const log of pendingFailoverLogs) {
+            try {
+              await prisma.failoverLog.create({ data: log });
+            } catch {
+              // Non-critical: failover logging is best-effort
+            }
+          }
 
           // ── Broadcast new events to SSE subscribers ──
           for (const { event } of newEvents) {

@@ -172,7 +172,7 @@ export async function PATCH(
         agentId,
         rules: (mergedRules ?? DEFAULT_RULES) as any,
         safetyMode: safetyMode ?? false,
-        version: 1,
+        version: mergedRules?.version ?? 1,
       },
       update: {
         ...(mergedRules !== undefined ? { rules: mergedRules as any } : {}),
