@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import jwt from "jsonwebtoken";
 import { prisma } from "@/lib/prisma";
 import { ApiError } from "@/lib/auth";
+import { validate, ValidationError, formatValidationErrors, refreshTokenSchema } from "@/lib/validation";
 
 // ──────────────────────────────────────────────
 // POST /api/v1/auth/refresh
@@ -12,11 +13,13 @@ import { ApiError } from "@/lib/auth";
 
 export async function POST(request: NextRequest) {
   try {
-    const body = await request.json().catch(() => ({}));
+    const rawBody = await request.json().catch(() => ({}));
+    // B11: Use zod validation
+    const body = validate(refreshTokenSchema, rawBody);
     // C7: Try to read refresh_token from HttpOnly cookie first, fall back to request body
     let refreshToken = request.cookies.get("refresh_token")?.value;
     if (!refreshToken) {
-      refreshToken = (body as { refreshToken?: string }).refreshToken;
+      refreshToken = body.refreshToken;
     }
 
     if (!refreshToken) {
@@ -99,6 +102,12 @@ export async function POST(request: NextRequest) {
 
     return response;
   } catch (error) {
+    if (error instanceof ValidationError) {
+      return NextResponse.json(
+        { code: "VALIDATION_ERROR", message: formatValidationErrors(error.errors) },
+        { status: 400 }
+      );
+    }
     if (error instanceof ApiError) {
       return NextResponse.json(
         { code: "API_ERROR", message: error.message },

@@ -271,3 +271,8 @@ export function startRateLimitCleanup(intervalMs = 5 * 60 * 1000): NodeJS.Timeou
     await cleanupRateLimitStore();
   }, intervalMs);
 }
+
+// S8: Auto-start cleanup on module load (skip in test environment)
+if (process.env.NODE_ENV !== "test") {
+  startRateLimitCleanup();
+}

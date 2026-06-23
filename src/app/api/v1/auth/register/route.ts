@@ -49,6 +49,7 @@ export async function POST(request: NextRequest) {
         id: true,
         email: true,
         name: true,
+        tokenVersion: true,
       },
     });
 
@@ -57,9 +58,9 @@ export async function POST(request: NextRequest) {
       userId: account.id,
       email: account.email,
       type: "access",
-      tokenVersion: 0, // New account starts at version 0
+      tokenVersion: account.tokenVersion,
     });
-    const agentToken = generateAgentToken(account.id);
+    const agentToken = generateAgentToken(account.id, account.tokenVersion);
     const expiresAt = Date.now() + 2 * 60 * 60 * 1000; // 2小时后
 
     // Store refresh token as HttpOnly cookie

@@ -16,7 +16,7 @@ if (NODE_ENV === "production") {
   }
 }
 
-function getCorsOrigin(request: NextRequest): string {
+function getCorsOrigin(request: NextRequest): string | null {
   const origin = request.headers.get("origin") || "";
 
   if (NODE_ENV !== "production") {
@@ -26,10 +26,12 @@ function getCorsOrigin(request: NextRequest): string {
 
   // Production: only allow whitelisted origins
   const allowedOrigins = process.env.ALLOWED_ORIGINS!.split(",").map((o) => o.trim());
-  if (allowedOrigins.includes(origin)) {
+  if (origin && allowedOrigins.includes(origin)) {
     return origin;
   }
-  return "null"; // Disallow origins not in the list
+  // S12: Return null for disallowed origins — do NOT send "null" (browsers
+  // send Origin: null in sandboxed contexts, which would then be reflected).
+  return null;
 }
 
 export function middleware(request: NextRequest) {
@@ -37,6 +39,10 @@ export function middleware(request: NextRequest) {
 
   // Handle OPTIONS preflight requests
   if (request.method === "OPTIONS") {
+    // S12: Reject preflight from disallowed origins with 403
+    if (corsOrigin === null) {
+      return new NextResponse(null, { status: 403 });
+    }
     return new NextResponse(null, {
       status: 204,
       headers: {
@@ -50,9 +56,13 @@ export function middleware(request: NextRequest) {
 
   // Handle actual requests: add CORS headers
   const response = NextResponse.next();
-  response.headers.set("Access-Control-Allow-Origin", corsOrigin);
-  response.headers.set("Access-Control-Allow-Methods", "GET, POST, PATCH, DELETE, OPTIONS");
-  response.headers.set("Access-Control-Allow-Headers", "Content-Type, Authorization");
+  // S12: Only set ACAO header for allowed origins; omit it entirely for
+  // disallowed origins so the browser blocks the response.
+  if (corsOrigin !== null) {
+    response.headers.set("Access-Control-Allow-Origin", corsOrigin);
+    response.headers.set("Access-Control-Allow-Methods", "GET, POST, PATCH, DELETE, OPTIONS");
+    response.headers.set("Access-Control-Allow-Headers", "Content-Type, Authorization");
+  }
   return response;
 }
 

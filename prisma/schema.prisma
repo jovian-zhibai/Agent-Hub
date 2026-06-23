@@ -109,6 +109,7 @@ model Agent {
 
   @@unique([accountId, projectPath, name])
   @@index([accountId, status])
+  @@index([accountId, enabled]) // S13: List enabled agents per account
   @@map("agents")
 }
 
@@ -167,6 +168,8 @@ model Key {
 
   @@unique([accountId, keyLabel])
   @@index([accountId, providerId])
+  @@index([accountId, isActive]) // S13: List active keys per account
+  @@index([health]) // S13: Filter keys by health status
   @@map("keys")
 }
 
@@ -187,6 +190,8 @@ model KeyBinding {
 
   @@unique([agentId, keyId])
   @@index([agentId, priority])
+  @@index([keyId]) // S13: Reverse lookup by key
+  @@index([status]) // S13: Filter by binding status
   @@map("key_bindings")
 }
 
@@ -229,6 +234,7 @@ model Model {
   provider Provider @relation(fields: [providerId], references: [id])
 
   @@unique([providerId, modelName])
+  @@index([isActive]) // S13: loadPricingMap queries where isActive: true
   @@map("models")
 }
 
@@ -313,6 +319,8 @@ model FailoverLog {
   toKey   Key?  @relation("failover_to", fields: [toKeyId], references: [id], onDelete: SetNull)
 
   @@index([agentId, triggeredAt(sort: Desc)])
+  @@index([fromKeyId]) // S13: Failover history by source key
+  @@index([toKeyId]) // S13: Failover history by destination key
   @@map("failover_logs")
 }
 
@@ -322,7 +330,7 @@ model FailoverLog {
 
 model AuditLog {
   id          String   @id @default(uuid())
-  accountId   String   @map("account_id")
+  accountId   String?  @map("account_id") // S15: Nullable to preserve audit trail after account deletion
   operatorId  String?  @map("operator_id")  // null = system
   action      String   // key_added / key_deleted / permission_changed / etc.
   targetType  String   @map("target_type")  // agent / key / workspace
@@ -330,9 +338,11 @@ model AuditLog {
   details     Json?    // JSONB — before/after diff
   createdAt   DateTime @default(now()) @map("created_at")
 
-  account Account @relation(fields: [accountId], references: [id], onDelete: Cascade)
+  account Account? @relation(fields: [accountId], references: [id], onDelete: SetNull) // S15: Preserve audit logs when account deleted
 
   @@index([accountId, createdAt(sort: Desc)])
   @@index([action, createdAt(sort: Desc)])
+  @@index([targetType, targetId]) // S13: Audit history by target
+  @@index([operatorId]) // S13: Audit history by operator
   @@map("audit_logs")
 }

@@ -64,7 +64,7 @@ export async function POST(request: NextRequest) {
       type: "access",
       tokenVersion: account.tokenVersion,
     });
-    const agentToken = generateAgentToken(account.id);
+    const agentToken = generateAgentToken(account.id, account.tokenVersion);
     const expiresAt = Date.now() + 2 * 60 * 60 * 1000; // 2小时后
 
     // C7: Store refresh token as HttpOnly cookie, not in response body

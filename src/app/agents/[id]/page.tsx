@@ -92,11 +92,16 @@ function OverviewTab({ agentId }: { agentId: string }) {
   const { data: agentData } = useAgent(agentId);
   const { data: trendData, isLoading: trendLoading } = useCostTrend(agentId);
   const agent = agentData?.agent;
+  const stats = agentData?.stats;
+  const currentKey = agentData?.keyBindings?.[0];
+  const model = agentData?.model;
 
   if (!agent) return null;
 
-  const successRate = agent.todayCalls > 0
-    ? ((agent.todayCalls - (agent.status === "error" ? 1 : 0)) / agent.todayCalls * 100).toFixed(1)
+  const todayCalls = stats?.todayCalls ?? 0;
+  const monthlyCost = stats?.monthlyCost ?? 0;
+  const successRate = stats?.successRate != null
+    ? (stats.successRate * 100).toFixed(1)
     : "—";
 
   return (
@@ -105,19 +110,19 @@ function OverviewTab({ agentId }: { agentId: string }) {
       <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-4">
         <MetricCard
           title="Today Calls"
-          value={formatNumber(agent.todayCalls ?? 0)}
+          value={formatNumber(todayCalls)}
           icon={PhoneCall}
         />
         <MetricCard
           title="Monthly Cost"
-          value={formatCurrency(agent.monthlyCost)}
+          value={formatCurrency(monthlyCost)}
           icon={DollarSign}
         />
         <MetricCard
           title="Avg Cost / Call"
           value={
-            agent.todayCalls > 0
-              ? formatCurrency(agent.monthlyCost / Math.max(agent.todayCalls, 1))
+            todayCalls > 0
+              ? formatCurrency(monthlyCost / Math.max(todayCalls, 1))
               : "$0.00"
           }
           icon={Activity}
@@ -139,10 +144,10 @@ function OverviewTab({ agentId }: { agentId: string }) {
             <div className="space-y-1">
               <p className="text-xs text-slate-500">Key</p>
               <p className="text-sm font-medium text-slate-200">
-                {agent.currentKey ? (
+                {currentKey ? (
                   <>
-                    {agent.currentKey.keyLabel}{" "}
-                    <span className="text-slate-500">({agent.currentKey.provider.name})</span>
+                    {currentKey.keyLabel}{" "}
+                    <span className="text-slate-500">({currentKey.provider.name})</span>
                   </>
                 ) : (
                   <span className="text-slate-500">Not bound</span>
@@ -152,8 +157,8 @@ function OverviewTab({ agentId }: { agentId: string }) {
             <div className="space-y-1">
               <p className="text-xs text-slate-500">Model</p>
               <p className="text-sm font-medium text-slate-200">
-                {agent.model ? (
-                  agent.model.displayName || agent.model.modelName
+                {model ? (
+                  model.displayName || model.modelName
                 ) : (
                   <span className="text-slate-500">Not set</span>
                 )}
@@ -240,13 +245,13 @@ function CostBreakdownTab({ agentId }: { agentId: string }) {
                     </span>
                   </td>
                   <td className="py-2.5 pr-4 text-slate-500">
-                    {"displayName" in item ? (item as unknown as { displayName: string }).displayName || "—" : "—"}
+                    {item.displayName || "—"}
                   </td>
                   <td className="py-2.5 pr-4 text-right text-slate-400">
-                    {"inputTokens" in item ? formatNumber((item as unknown as { inputTokens: number }).inputTokens) : "—"}
+                    {formatNumber(item.tokensIn)}
                   </td>
                   <td className="py-2.5 pr-4 text-right text-slate-400">
-                    {"outputTokens" in item ? formatNumber((item as unknown as { outputTokens: number }).outputTokens) : "—"}
+                    {formatNumber(item.tokensOut)}
                   </td>
                   <td className="py-2.5 pr-4 text-right font-medium">
                     {formatCurrency(item.cost)}
@@ -314,7 +319,13 @@ function PermissionsTab({ agentId }: { agentId: string }) {
     setPendingTools((prev) => new Set(prev).add(tool));
 
     try {
-      await agents.updatePermissions(agentId, { rules: { [tool]: newAction } });
+      await agents.updatePermissions(agentId, {
+        rules: {
+          tools: {
+            [tool]: newAction === "allow" ? { allow: true, deny: false } : { allow: false, deny: true },
+          },
+        },
+      });
     } catch {
       // Rollback on failure
       setData((prev) => {

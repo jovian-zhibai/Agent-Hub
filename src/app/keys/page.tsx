@@ -202,11 +202,11 @@ function AddKeyModal({ open, onClose, onSuccess }: AddKeyModalProps) {
         baseUrl,
         label: keyLabel || undefined,
         scope,
+        protocol: providerName === "DeepSeek"
+          ? (deepSeekProtocol === "anthropic" ? "anthropic" : "openai")
+          : "messages",
       };
       if (initialBalance) payload.initialBalance = parseFloat(initialBalance);
-      if (providerName === "DeepSeek") {
-        payload.protocol = deepSeekProtocol === "anthropic" ? "anthropic" : "openai";
-      }
 
       const createRes = await keys.create(payload);
       const keyId = createRes.key.id;
@@ -614,7 +614,7 @@ function KeyRow({ keyItem, allKeys, onDelete, onTest, testingIds }: KeyRowProps)
 
         {/* Masked key */}
         <code className="hidden shrink-0 rounded bg-slate-800 px-2 py-0.5 text-xs text-slate-400 font-mono sm:block">
-          {maskKey(keyItem.keyValue)}
+          {keyItem.keyPrefix || "—"}
         </code>
 
         {/* Health badge */}
@@ -681,32 +681,10 @@ function KeyRow({ keyItem, allKeys, onDelete, onTest, testingIds }: KeyRowProps)
             </div>
           ) : (
             <div className="space-y-5">
-              {/* Failover config */}
-              <div>
-                <label className="mb-1.5 block text-xs font-medium text-slate-400">
-                  Failover Configuration
-                </label>
-                <select
-                  className="w-full rounded-lg border border-slate-700 bg-slate-800/50 px-3 py-2 text-sm text-slate-200 focus:border-indigo-500 focus:outline-none"
-                  value={keyItem.failoverKeyId || ""}
-                  onChange={async (e) => {
-                    try {
-                      await keys.update(keyItem.id, { failoverKeyId: e.target.value || null });
-                    } catch {
-                      // silently fail
-                    }
-                  }}
-                >
-                  <option value="">No failover</option>
-                  {allKeys
-                    .filter((k) => k.id !== keyItem.id)
-                    .map((k) => (
-                      <option key={k.id} value={k.id}>
-                        {k.keyLabel || k.label || "Unnamed"} ({k.provider?.name || k.providerId})
-                      </option>
-                    ))}
-                </select>
-              </div>
+              {/* TODO: Failover configuration UI removed — the key update endpoint
+                  (updateKeySchema) does not accept failoverKeyId and there is no
+                  separate key-failover endpoint. Re-enable once the backend
+                  exposes a way to configure key failover relationships. */}
 
               {/* Usage chart */}
               <div>

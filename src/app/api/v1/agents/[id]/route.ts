@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { prisma } from "@/lib/prisma";
 import { getAuthUser, ApiError } from "@/lib/auth";
+import { validate, ValidationError, formatValidationErrors, updateAgentSchema } from "@/lib/validation";
 
 // ──────────────────────────────────────────────
 // GET /api/v1/agents/:id
@@ -12,6 +13,19 @@ import { getAuthUser, ApiError } from "@/lib/auth";
 //   - Stats: today calls, monthly cost, avg cost, success rate
 //   - Model info
 // ──────────────────────────────────────────────
+
+// B10: UTC date helpers (consistent with dashboard/cost-trend)
+function todayStartUTC(): Date {
+  const d = new Date();
+  d.setUTCHours(0, 0, 0, 0);
+  return d;
+}
+function monthStartUTC(): Date {
+  const d = new Date();
+  d.setUTCDate(1);
+  d.setUTCHours(0, 0, 0, 0);
+  return d;
+}
 
 export async function GET(
   request: NextRequest,
@@ -71,74 +85,33 @@ export async function GET(
       );
     }
 
-    // ── Compute stats from telemetry ───────────
-    const now = new Date();
-    const todayStart = new Date(now.getFullYear(), now.getMonth(), now.getDate());
-    const monthStart = new Date(now.getFullYear(), now.getMonth(), 1);
-
-    // Today's tool calls
-    const todayCalls = await prisma.telemetryLog.count({
-      where: {
-        agentId: id,
-        reportedAt: { gte: todayStart },
-        eventType: "tool_call",
-      },
+    // ── Compute stats from aggregation table ────
+    // B4: Use TelemetryDaily instead of scanning raw telemetry_logs
+    const todayAgg = await prisma.telemetryDaily.aggregate({
+      where: { agentId: id, day: { equals: todayStartUTC() } },
+      _sum: { toolCalls: true, permissionsDenied: true },
     });
 
-    // ── Load models pricing ───────────────────────
-    const allModels = await prisma.model.findMany({
-      where: { isActive: true },
-      select: {
-        modelName: true,
-        pricingInput: true,
-        pricingOutput: true,
-      },
-    });
-    const pricingMap = new Map<string, { pricingInput: number; pricingOutput: number }>();
-    for (const m of allModels) {
-      if (!pricingMap.has(m.modelName)) {
-        pricingMap.set(m.modelName, {
-          pricingInput: Number(m.pricingInput),
-          pricingOutput: Number(m.pricingOutput),
-        });
-      }
-    }
-
-    // Monthly token_usage events (for cost extraction)
-    const monthlyUsage = await prisma.telemetryLog.findMany({
-      where: {
-        agentId: id,
-        reportedAt: { gte: monthStart },
-        eventType: "token_usage",
-      },
-      select: { payload: true },
+    const monthAgg = await prisma.telemetryDaily.aggregate({
+      where: { agentId: id, day: { gte: monthStartUTC() } },
+      _sum: { toolCalls: true, cost: true },
     });
 
-    let monthlyCost = 0;
-    let costCount = 0;
-    for (const entry of monthlyUsage) {
-      const payload = entry.payload as Record<string, unknown>;
-      const model = typeof payload.model === "string" ? payload.model : "unknown";
-      const tokensIn = (payload.tokensIn as number) || (payload.promptTokens as number) || 0;
-      const tokensOut = (payload.tokensOut as number) || (payload.completionTokens as number) || 0;
+    const todayCalls = todayAgg._sum.toolCalls ?? 0;
+    // B3: monthlyCost from agent.monthlySpent (maintained by budget engine)
+    const monthlyCost = Number(agent.monthlySpent);
+    const monthlyToolCalls = monthAgg._sum.toolCalls ?? 0;
+    const avgCost = monthlyToolCalls > 0 ? monthlyCost / monthlyToolCalls : 0;
 
-      // Match pricing from models table (reuses same pattern as dashboard/route.ts and cost-trend/route.ts)
-      const pricing = pricingMap.get(model);
-      if (pricing) {
-        monthlyCost += (tokensIn * pricing.pricingInput + tokensOut * pricing.pricingOutput) / 1_000_000;
-      }
-
-      if (tokensIn > 0 || tokensOut > 0) costCount++;
-    }
-    const avgCost = costCount > 0 ? monthlyCost / costCount : 0;
-
-    // Monthly total events (for success rate)
-    const monthlyTotal = monthlyUsage.length;
-    const successCount = monthlyUsage.filter((e) => {
-      const payload = e.payload as Record<string, unknown>;
-      return payload.error === undefined || payload.error === null;
-    }).length;
-    const successRate = monthlyTotal > 0 ? successCount / monthlyTotal : 1;
+    // Success rate: 1 - (permissionsDenied / toolCalls) for this month
+    const monthDeniedAgg = await prisma.telemetryDaily.aggregate({
+      where: { agentId: id, day: { gte: monthStartUTC() } },
+      _sum: { permissionsDenied: true },
+    });
+    const deniedCount = monthDeniedAgg._sum.permissionsDenied ?? 0;
+    const successRate = monthlyToolCalls > 0
+      ? Math.max(0, 1 - deniedCount / monthlyToolCalls)
+      : 1;
 
     // ── Build key bindings response ────────────
     const keyBindings = agent.keyBindings.map((kb) => ({
@@ -251,18 +224,12 @@ export async function PATCH(
       );
     }
 
-    // Only allow updating specific fields
-    const updateData: Record<string, unknown> = {};
-    if (typeof body.enabled === "boolean") updateData.enabled = body.enabled;
-    if (body.status) updateData.status = body.status;
-    if (typeof body.safetyMode === "boolean") updateData.safetyMode = body.safetyMode;
-    if (body.name) updateData.name = body.name;
-    if (body.description !== undefined) updateData.description = body.description;
-    if (body.monthlyBudget !== undefined) updateData.monthlyBudget = body.monthlyBudget;
+    // B11: Use zod validation instead of manual field extraction
+    const data = validate(updateAgentSchema, body);
 
     const updated = await prisma.agent.update({
       where: { id },
-      data: updateData,
+      data,
     });
 
     return NextResponse.json({
@@ -271,6 +238,12 @@ export async function PATCH(
       status: updated.status,
     });
   } catch (error) {
+    if (error instanceof ValidationError) {
+      return NextResponse.json(
+        { code: "VALIDATION_ERROR", message: formatValidationErrors(error.errors) },
+        { status: 400 }
+      );
+    }
     if (error instanceof ApiError) {
       return NextResponse.json(
         { code: error.name === "AuthError" ? "AUTH_ERROR" : "API_ERROR", message: error.message },

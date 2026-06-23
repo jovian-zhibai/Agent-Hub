@@ -2,6 +2,7 @@
 
 import { useEffect, useState, useRef } from "react";
 import { useAuth } from "@/contexts/auth";
+import { API_BASE } from "@/lib/api";
 
 // ── Types ──────────────────────────────────────
 
@@ -58,7 +59,7 @@ export function ActivityStream({ maxItems = 50 }: { maxItems?: number }) {
 
       // C4: Fetch a short-lived SSE token instead of sending the full JWT in URL
       try {
-        const res = await fetch("/api/v1/auth/sse-token", {
+        const res = await fetch(`${API_BASE}/v1/auth/sse-token`, {
           headers: { Authorization: `Bearer ${token}` },
         });
         if (res.ok) {
@@ -69,7 +70,7 @@ export function ActivityStream({ maxItems = 50 }: { maxItems?: number }) {
         // Fallback: use the access token (existing behavior)
       }
 
-      const es = new EventSource(`/api/v1/events?token=${currentToken}`);
+      const es = new EventSource(`${API_BASE}/v1/events?token=${currentToken}`);
       eventSourceRef.current = es;
 
       es.onopen = () => {

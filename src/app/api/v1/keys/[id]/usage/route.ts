@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { prisma } from "@/lib/prisma";
 import { getAuthUser, ApiError } from "@/lib/auth";
+import { computeEventCost, loadPricingMap } from "@/lib/cost";
 
 // ──────────────────────────────────────────────
 // Types
@@ -43,25 +44,20 @@ interface KeyUsageResponse {
   failoverCount: number;
 }
 
-interface TokenUsagePayload {
-  model?: string;
-  promptTokens?: number;
-  completionTokens?: number;
-}
-
 // ──────────────────────────────────────────────
 // Helpers
 // ──────────────────────────────────────────────
 
-function dateKey(d: Date): string {
-  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+// B10: UTC date key (consistent with dashboard/cost-trend)
+function utcDateKey(d: Date): string {
+  return `${d.getUTCFullYear()}-${String(d.getUTCMonth() + 1).padStart(2, "0")}-${String(d.getUTCDate()).padStart(2, "0")}`;
 }
 
 function computeStartDate(range: string | null): Date {
   const days = range === "30d" ? 30 : 7;
   const d = new Date();
-  d.setDate(d.getDate() - days);
-  d.setHours(0, 0, 0, 0);
+  d.setUTCDate(d.getUTCDate() - days);
+  d.setUTCHours(0, 0, 0, 0);
   return d;
 }
 
@@ -133,24 +129,8 @@ export async function GET(
       }),
     ]);
 
-    // ── Load models pricing ──────────────────
-    const allModels = await prisma.model.findMany({
-      where: { isActive: true },
-      select: {
-        modelName: true,
-        pricingInput: true,
-        pricingOutput: true,
-      },
-    });
-    const pricingMap = new Map<string, { pricingInput: number; pricingOutput: number }>();
-    for (const m of allModels) {
-      if (!pricingMap.has(m.modelName)) {
-        pricingMap.set(m.modelName, {
-          pricingInput: Number(m.pricingInput),
-          pricingOutput: Number(m.pricingOutput),
-        });
-      }
-    }
+    // ── Load pricing map (B9/B14: use centralized cost.ts) ──
+    const pricingMap = await loadPricingMap(prisma);
 
     // ── Aggregate ─────────────────────────────
     let totalCost = 0;
@@ -168,16 +148,11 @@ export async function GET(
     const seenAgentIds = new Set<string>();
 
     for (const event of usageEvents) {
-      const payload = event.payload as TokenUsagePayload;
-      const model = payload.model ?? "unknown";
-      const tokensIn = payload.promptTokens ?? 0;
-      const tokensOut = payload.completionTokens ?? 0;
-
-      const pricing = pricingMap.get(model);
-      let cost = 0;
-      if (pricing) {
-        cost = (tokensIn * pricing.pricingInput + tokensOut * pricing.pricingOutput) / 1_000_000;
-      }
+      // B9/B14: Use computeEventCost (handles tokensIn/tokensOut + promptTokens/completionTokens)
+      const { cost, tokensIn, tokensOut } = computeEventCost(
+        event.payload as Record<string, unknown>,
+        pricingMap,
+      );
 
       totalCost += cost;
       totalCalls += 1;
@@ -193,8 +168,8 @@ export async function GET(
       });
       seenAgentIds.add(agentKey);
 
-      // By day
-      const day = dateKey(event.reportedAt);
+      // By day (B10: UTC date key)
+      const day = utcDateKey(event.reportedAt);
       const existingDay = dayMap.get(day) ?? { cost: 0, calls: 0 };
       dayMap.set(day, {
         cost: existingDay.cost + cost,

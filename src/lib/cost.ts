@@ -130,7 +130,11 @@ export function extractTokens(
   const model =
     typeof p.model === "string" && p.model.length > 0 ? p.model : "unknown";
 
-  return { tokensIn, tokensOut, model };
+  // S10: Prevent negative token values (negative-cost attack)
+  const safeTokensIn = Math.max(0, tokensIn);
+  const safeTokensOut = Math.max(0, tokensOut);
+
+  return { tokensIn: safeTokensIn, tokensOut: safeTokensOut, model };
 }
 
 // ──────────────────────────────────────────────

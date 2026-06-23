@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { prisma } from "@/lib/prisma";
 import { getAuthUser, ApiError } from "@/lib/auth";
+import { validate, ValidationError, formatValidationErrors, createAgentSchema } from "@/lib/validation";
 
 // ──────────────────────────────────────────────
 // GET /api/v1/agents
@@ -149,24 +150,27 @@ export async function POST(request: NextRequest) {
     const user = await getAuthUser(request);
     const body = await request.json();
 
+    // B11: Use zod validation
+    const data = validate(createAgentSchema, body);
+
     // Upsert 逻辑：同一 account + projectPath + name 已存在则更新，否则新增
-    const projectPath = body.projectPath || "";
-    const projectName = body.projectName || "";
+    const projectPath = data.projectPath || "";
+    const projectName = data.projectName || "";
 
     const existing = await prisma.agent.findFirst({
       where: {
         accountId: user.id,
         projectPath: projectPath,
-        name: body.name,
+        name: data.name,
       },
     });
 
     let agent;
     if (existing) {
       // B13: Don't overwrite status, enabled, or other admin-managed fields
-      const updateData: Record<string, any> = {};
-      if (body.machineId !== undefined) {
-        updateData.machineId = body.machineId;
+      const updateData: Record<string, unknown> = {};
+      if (data.machineId !== undefined) {
+        updateData.machineId = data.machineId;
       } else if (existing.machineId) {
         updateData.machineId = existing.machineId;
       }
@@ -180,11 +184,11 @@ export async function POST(request: NextRequest) {
     } else {
       agent = await prisma.agent.create({
         data: {
-          name: body.name,
-          framework: body.framework || body.type || "opencode",
+          name: data.name,
+          framework: data.framework,
           status: "running",
           accountId: user.id,
-          machineId: body.machineId ?? null,
+          machineId: data.machineId ?? null,
           enabled: true,
           projectName: projectName,
           projectPath: projectPath,
@@ -218,6 +222,12 @@ export async function POST(request: NextRequest) {
       { status: 201 }
     );
   } catch (error) {
+    if (error instanceof ValidationError) {
+      return NextResponse.json(
+        { code: "VALIDATION_ERROR", message: formatValidationErrors(error.errors) },
+        { status: 400 }
+      );
+    }
     if (error instanceof ApiError) {
       return NextResponse.json(
         {

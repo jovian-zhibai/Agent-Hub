@@ -139,6 +139,17 @@ export async function PATCH(
       },
     });
 
+    // S9: Audit key update
+    await prisma.auditLog.create({
+      data: {
+        accountId: user.id,
+        action: "key_updated",
+        targetType: "key",
+        targetId: id,
+        details: { changes: updateData as any },
+      },
+    });
+
     const response = {
       id: updated.id,
       keyLabel: updated.keyLabel,
@@ -200,7 +211,7 @@ export async function DELETE(
     // ── Verify key exists and belongs to user ──
     const existing = await prisma.key.findUnique({
       where: { id },
-      select: { accountId: true },
+      select: { accountId: true, keyLabel: true },
     });
 
     if (!existing) {
@@ -216,6 +227,17 @@ export async function DELETE(
         { status: 403 }
       );
     }
+
+    // S9: Audit key deletion (capture keyLabel before delete)
+    await prisma.auditLog.create({
+      data: {
+        accountId: user.id,
+        action: "key_deleted",
+        targetType: "key",
+        targetId: id,
+        details: { keyLabel: existing.keyLabel },
+      },
+    });
 
     // ── Delete key (cascades key_bindings) ──────
     await prisma.key.delete({ where: { id } });

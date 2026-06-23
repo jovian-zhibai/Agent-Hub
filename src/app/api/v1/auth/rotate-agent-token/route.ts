@@ -12,7 +12,7 @@ import { getAuthUser, generateAgentToken, ApiError } from "@/lib/auth";
 export async function POST(request: NextRequest) {
   try {
     const user = await getAuthUser(request);
-    const agentToken = generateAgentToken(user.id);
+    const agentToken = generateAgentToken(user.id, user.tokenVersion);
 
     return NextResponse.json(
       { agentToken },

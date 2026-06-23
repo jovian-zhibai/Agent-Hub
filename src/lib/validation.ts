@@ -181,6 +181,14 @@ export const batchTelemetrySchema = z.object({
 });
 
 // ──────────────────────────────────────────────
+// Auth Schemas
+// ──────────────────────────────────────────────
+
+export const refreshTokenSchema = z.object({
+  refreshToken: z.string().min(1).optional(),
+});
+
+// ──────────────────────────────────────────────
 // Helper: Validate and return typed data
 // ──────────────────────────────────────────────
 

@@ -30,6 +30,7 @@ export interface AgentTokenPayload {
   userId: string;
   type: "agent";
   agentId?: string;
+  tokenVersion: number;
 }
 
 export interface SSETokenPayload {
@@ -106,11 +107,14 @@ export function verifyToken(token: string): TokenPayload | null {
 /**
  * Generate an agent-specific long-lived JWT token.
  * Used by SDK/CLI for telemetry reporting and sync.
- * Intentionally no expiry on the constant — 365d is a reasonable
- * default; users rotate via the API when needed.
+ * Embeds tokenVersion so it can be revoked via password change.
  */
-export function generateAgentToken(userId: string, agentId?: string): string {
-  const payload: AgentTokenPayload = { userId, type: "agent" };
+export function generateAgentToken(
+  userId: string,
+  tokenVersion: number,
+  agentId?: string,
+): string {
+  const payload: AgentTokenPayload = { userId, type: "agent", tokenVersion };
   if (agentId) {
     payload.agentId = agentId;
   }
@@ -161,6 +165,10 @@ export function verifyAgentToken(request: NextRequest): AgentTokenPayload | null
     if (decoded.type !== "agent") {
       return null;
     }
+    // S2: Reject old agent tokens without tokenVersion (pre-fix)
+    if (typeof decoded.tokenVersion !== "number") {
+      return null;
+    }
     return decoded;
   } catch {
     return null;
@@ -191,6 +199,10 @@ export async function getAuthUser(
   const payload = verifyToken(token);
   if (!payload) {
     throw new AuthError("Invalid or expired token", 401);
+  }
+  // S1: Refresh tokens must not be usable as access tokens
+  if (payload.type !== "access") {
+    throw new AuthError("Invalid token type", 401);
   }
 
   const account = await prisma.account.findUnique({

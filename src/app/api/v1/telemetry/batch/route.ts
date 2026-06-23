@@ -34,6 +34,17 @@ export async function POST(request: NextRequest) {
     // Try agent token first (SDK / CLI calls)
     const agentPayload = verifyAgentToken(request);
     if (agentPayload) {
+      // S2: Verify tokenVersion against database to support revocation
+      const account = await prisma.account.findUnique({
+        where: { id: agentPayload.userId },
+        select: { tokenVersion: true },
+      });
+      if (!account || agentPayload.tokenVersion !== account.tokenVersion) {
+        return NextResponse.json(
+          { code: "AUTH_ERROR", message: "Token has been revoked" },
+          { status: 401 },
+        );
+      }
       userId = agentPayload.userId;
       isAgentAuth = true;
     } else {
@@ -78,6 +89,26 @@ export async function POST(request: NextRequest) {
     // ── Idempotent telemetry ingestion ────────
     const validEvents = events.filter((e) => userAgentIds.has(e.agentId));
 
+    // S3: Validate keyId ownership — prevent cross-user balance tampering
+    const eventsWithKey = validEvents.filter((e) => e.keyId);
+    if (eventsWithKey.length > 0) {
+      const userKeyIds = new Set(
+        (
+          await prisma.key.findMany({
+            where: { accountId: userId },
+            select: { id: true },
+          })
+        ).map((k) => k.id),
+      );
+      // Drop events whose keyId doesn't belong to this user
+      for (let i = validEvents.length - 1; i >= 0; i--) {
+        const e = validEvents[i];
+        if (e.keyId && !userKeyIds.has(e.keyId)) {
+          validEvents.splice(i, 1);
+        }
+      }
+    }
+
     let ingested = 0;
     const budgetAlerts: BudgetAlert[] = [];
     if (validEvents.length > 0) {
@@ -97,6 +128,15 @@ export async function POST(request: NextRequest) {
         // telemetry row, the agent/key counters, and the hourly/daily rollups
         // stay consistent even if one part fails.
         const reportedAt = new Date(event.timestamp || Date.now());
+
+        // S11: Reject timestamps outside reasonable range
+        const now = Date.now();
+        const tsTime = reportedAt.getTime();
+        if (tsTime > now + 24 * 60 * 60 * 1000 || tsTime < now - 365 * 24 * 60 * 60 * 1000) {
+          // Skip events with future (>1d) or ancient (>1y) timestamps
+          continue;
+        }
+
         const isTokenUsage = event.eventType === "token_usage";
 
         await prisma.$transaction(async (tx) => {
@@ -109,17 +149,24 @@ export async function POST(request: NextRequest) {
           });
           if (existing) return; // replay — skip all downstream accounting
 
-          await tx.telemetryLog.create({
-            data: {
-              eventId,
-              agentId: event.agentId,
-              keyId: event.keyId || null,
-              accountId: userId,
-              eventType: event.eventType as any,
-              payload: (event.payload || {}) as any,
-              reportedAt,
-            },
-          });
+          // S6: Catch P2002 (unique constraint violation) for concurrent duplicates
+          try {
+            await tx.telemetryLog.create({
+              data: {
+                eventId,
+                agentId: event.agentId,
+                keyId: event.keyId || null,
+                accountId: userId,
+                eventType: event.eventType as any,
+                payload: (event.payload || {}) as any,
+                reportedAt,
+              },
+            });
+          } catch (err: any) {
+            // P2002 = unique constraint violation — concurrent duplicate eventId
+            if (err?.code === "P2002") return; // treat as replay
+            throw err; // re-throw other errors
+          }
 
           // B8: Record key_failover events in FailoverLog table
           if (event.eventType === "key_failover") {
@@ -149,10 +196,11 @@ export async function POST(request: NextRequest) {
           if (isTokenUsage) {
             const { cost, tokensIn, tokensOut } = computeEventCost(event.payload, pricingMap);
 
-            // B1: fetch current agent state BEFORE incrementing so we can
-            // detect threshold crossings (80% warning / 100% auto-disable).
-            const agentBefore = await tx.agent.findUnique({
+            // S4: Use update return value (atomic) instead of read-then-write
+            // This eliminates the TOCTOU race on budget threshold detection
+            const updatedAgent = await tx.agent.update({
               where: { id: event.agentId },
+              data: { monthlySpent: { increment: cost } },
               select: {
                 monthlySpent: true,
                 monthlyBudget: true,
@@ -160,22 +208,15 @@ export async function POST(request: NextRequest) {
               },
             });
 
-            const prevSpent = agentBefore ? Number(agentBefore.monthlySpent) : 0;
-            const monthlyBudget = agentBefore?.monthlyBudget
-              ? Number(agentBefore.monthlyBudget)
+            const newSpent = Number(updatedAgent.monthlySpent);
+            const prevSpent = newSpent - cost;
+            const monthlyBudget = updatedAgent.monthlyBudget
+              ? Number(updatedAgent.monthlyBudget)
               : null;
-            const wasEnabled = agentBefore?.enabled ?? true;
-
-            // B1: agent budget accumulator
-            await tx.agent.update({
-              where: { id: event.agentId },
-              data: { monthlySpent: { increment: cost } },
-            });
+            const wasEnabled = updatedAgent.enabled;
 
             // B1: budget enforcement — 80% warning + 100% auto-disable.
-            // Runs inside the same transaction so the audit log + agent
-            // disable roll back together if anything downstream fails.
-            if (agentBefore && monthlyBudget !== null && monthlyBudget > 0) {
+            if (monthlyBudget !== null && monthlyBudget > 0) {
               const budgetResult = await enforceAgentBudget(tx, {
                 agentId: event.agentId,
                 accountId: userId,
@@ -191,7 +232,7 @@ export async function POST(request: NextRequest) {
                   agentId: event.agentId,
                   accountId: userId,
                   prevSpent,
-                  newSpent: prevSpent + cost,
+                  newSpent,
                   budget: monthlyBudget,
                   triggeredAt: reportedAt.toISOString(),
                 },
@@ -201,7 +242,7 @@ export async function POST(request: NextRequest) {
             }
 
             // B3: key spend tracking — increment spent; decrement currentBalance
-            // only if the key tracks a balance (null = unlimited / prepaid elsewhere).
+            // S5: Use updateMany with gte filter to prevent negative balance
             if (event.keyId) {
               try {
                 const key = await tx.key.findUnique({
@@ -209,15 +250,25 @@ export async function POST(request: NextRequest) {
                   select: { currentBalance: true },
                 });
                 if (key) {
-                  await tx.key.update({
-                    where: { id: event.keyId },
-                    data: {
-                      spent: { increment: cost },
-                      ...(key.currentBalance !== null
-                        ? { currentBalance: { decrement: cost } }
-                        : {}),
-                    },
-                  });
+                  if (key.currentBalance !== null) {
+                    // S5: Only decrement if balance is sufficient (atomic check)
+                    await tx.key.updateMany({
+                      where: {
+                        id: event.keyId,
+                        currentBalance: { gte: cost },
+                      },
+                      data: {
+                        spent: { increment: cost },
+                        currentBalance: { decrement: cost },
+                      },
+                    });
+                  } else {
+                    // Unlimited key — just track spend
+                    await tx.key.update({
+                      where: { id: event.keyId },
+                      data: { spent: { increment: cost } },
+                    });
+                  }
                 }
               } catch {
                 // best-effort — key may have been deleted concurrently

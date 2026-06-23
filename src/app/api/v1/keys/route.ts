@@ -184,6 +184,17 @@ export async function POST(request: NextRequest) {
       },
     });
 
+    // S9: Audit key creation
+    await prisma.auditLog.create({
+      data: {
+        accountId: user.id,
+        action: "key_added",
+        targetType: "key",
+        targetId: key.id,
+        details: { keyLabel: key.keyLabel, providerId: key.providerId },
+      },
+    });
+
     const response: KeyResponse = {
       id: key.id,
       keyLabel: key.keyLabel,

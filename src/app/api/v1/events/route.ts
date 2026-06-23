@@ -56,22 +56,39 @@ export async function GET(request: NextRequest) {
     // ── Create SSE stream ──
     const encoder = new TextEncoder();
     let closed = false;
+    let heartbeat: NodeJS.Timeout | null = null;
+    let streamController: ReadableStreamDefaultController<Uint8Array> | null = null;
+
+    // Register callback for this user's events
+    const callback = (event: string) => {
+      if (!closed && streamController) {
+        try {
+          streamController.enqueue(encoder.encode(event));
+        } catch {
+          closed = true;
+        }
+      }
+    };
+
+    // S7: Centralized cleanup function — called from both abort and cancel
+    const cleanup = () => {
+      if (closed) return;
+      closed = true;
+      if (heartbeat) clearInterval(heartbeat);
+      const callbacks = eventStreams.get(userId);
+      if (callbacks) {
+        callbacks.delete(callback);
+        if (callbacks.size === 0) {
+          eventStreams.delete(userId);
+        }
+      }
+    };
 
     const stream = new ReadableStream({
       start(controller) {
+        streamController = controller;
         // Send initial connected event
         controller.enqueue(encoder.encode("event: connected\ndata: {}\n\n"));
-
-        // Register callback for this user's events
-        const callback = (event: string) => {
-          if (!closed) {
-            try {
-              controller.enqueue(encoder.encode(event));
-            } catch {
-              closed = true;
-            }
-          }
-        };
 
         if (!eventStreams.has(userId)) {
           eventStreams.set(userId, new Set());
@@ -79,31 +96,24 @@ export async function GET(request: NextRequest) {
         eventStreams.get(userId)!.add(callback);
 
         // Heartbeat every 15s to keep connection alive
-        const heartbeat = setInterval(() => {
+        heartbeat = setInterval(() => {
           if (closed) {
-            clearInterval(heartbeat);
+            if (heartbeat) clearInterval(heartbeat);
             return;
           }
           try {
             controller.enqueue(encoder.encode(": heartbeat\n\n"));
           } catch {
-            closed = true;
-            clearInterval(heartbeat);
+            cleanup();
           }
         }, 15_000);
 
         // Cleanup on client disconnect
-        request.signal.addEventListener("abort", () => {
-          closed = true;
-          clearInterval(heartbeat);
-          const callbacks = eventStreams.get(userId);
-          if (callbacks) {
-            callbacks.delete(callback);
-            if (callbacks.size === 0) {
-              eventStreams.delete(userId);
-            }
-          }
-        });
+        request.signal.addEventListener("abort", cleanup);
+      },
+      // S7: Implement cancel to prevent memory leak when consumer calls reader.cancel()
+      cancel() {
+        cleanup();
       },
     });
 

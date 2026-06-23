@@ -3,7 +3,7 @@
 // ──────────────────────────────────────────────
 
 const RAW_BASE = process.env.NEXT_PUBLIC_API_URL || "http://localhost:3000";
-const API_BASE = RAW_BASE.endsWith("/api") ? RAW_BASE : `${RAW_BASE}/api`;
+export const API_BASE = RAW_BASE.endsWith("/api") ? RAW_BASE : `${RAW_BASE}/api`;
 
 // ── Generic fetch wrapper ─────────────────────
 
@@ -124,10 +124,58 @@ export interface DashboardResponse {
   }[];
   costTrend: CostTrendPoint[];
   keyOverview: KeyOverviewItem[];
+  lastUpdated?: string;
+}
+
+export interface AgentDetailStats {
+  todayCalls: number;
+  monthlyCost: number;
+  avgCost: number;
+  successRate: number;
+}
+
+export interface AgentDetailKeyBinding {
+  keyId: string;
+  keyLabel: string;
+  provider: { name: string };
+  protocol: string;
+  priority: number;
+  status: string;
+}
+
+export interface AgentDetailFailoverLog {
+  fromKeyId: string | null;
+  toKeyId: string | null;
+  reason: string;
+  triggeredAt: string;
+}
+
+export interface AgentDetailPermissions {
+  rules: Record<string, unknown>;
+  safetyMode: boolean;
+  version: number;
+}
+
+export interface AgentDetail {
+  id: string;
+  name: string;
+  framework: string;
+  status: string;
+  enabled: boolean;
+  safetyMode: boolean;
+  machineId: string;
+  createdAt: string;
+  updatedAt: string;
 }
 
 export interface AgentDetailResponse {
-  agent: Agent;
+  agent: AgentDetail;
+  permissions: AgentDetailPermissions;
+  keyBindings: AgentDetailKeyBinding[];
+  failoverLogs: AgentDetailFailoverLog[];
+  stats: AgentDetailStats;
+  model: { modelName: string; displayName: string } | null;
+  lastUpdated: string;
 }
 
 export interface CostPoint {
@@ -137,7 +185,11 @@ export interface CostPoint {
 
 export interface CostBreakdownItem {
   model: string;
+  displayName: string;
   cost: number;
+  calls: number;
+  tokensIn: number;
+  tokensOut: number;
   percentage: number;
 }
 
@@ -149,17 +201,24 @@ export interface CostBreakdownResponse {
 export interface Key {
   id: string;
   keyLabel: string;
-  providerId: string;
-  provider?: { name: string; displayName: string };
-  health: string;
-  keyValue?: string;
-  baseUrl?: string;
+  providerId?: string;
+  provider?: { id?: string; name: string; displayName: string };
+  protocol?: string;
+  keyPrefix?: string | null;
   scope?: string;
+  group?: string | null;
+  note?: string | null;
+  health: string;
   initialBalance: number | null;
   burnRate: number | null;
-  modelCount?: number;
+  lastTestedAt?: string | null;
+  isActive?: boolean;
   agentCount?: number;
   createdAt: string;
+  // Legacy/compat fields (not returned by list endpoint)
+  keyValue?: string;
+  baseUrl?: string;
+  modelCount?: number;
   failoverKeyId?: string | null;
   label?: string;
 }
