@@ -287,6 +287,7 @@ function PermissionsTab({ agentId }: { agentId: string }) {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [pendingTools, setPendingTools] = useState<Set<string>>(new Set());
+  const [safetyModeLoading, setSafetyModeLoading] = useState(false);
 
   const loadPermissions = useCallback(() => {
     let cancelled = false;
@@ -365,7 +366,8 @@ function PermissionsTab({ agentId }: { agentId: string }) {
   };
 
   const toggleSafetyMode = async () => {
-    if (!data) return;
+    if (!data || safetyModeLoading) return;
+    setSafetyModeLoading(true);
     const newSafetyMode = !data.safetyMode;
 
     setData((prev) => {
@@ -375,11 +377,14 @@ function PermissionsTab({ agentId }: { agentId: string }) {
 
     try {
       await agents.updatePermissions(agentId, { safetyMode: newSafetyMode });
-    } catch {
+    } catch (err) {
       setData((prev) => {
         if (!prev) return prev;
         return { ...prev, safetyMode: !newSafetyMode };
       });
+      setError(err instanceof Error ? err.message : "Failed to toggle safety mode");
+    } finally {
+      setSafetyModeLoading(false);
     }
   };
 
@@ -446,7 +451,10 @@ function PermissionsTab({ agentId }: { agentId: string }) {
 
         {data?.safetyMode !== undefined && (
           <div
-            className="mt-4 flex items-center justify-between gap-2 rounded-lg bg-indigo-900/20 border border-indigo-800/40 px-4 py-3 cursor-pointer hover:bg-indigo-900/30 transition-colors"
+            className={cn(
+              "mt-4 flex items-center justify-between gap-2 rounded-lg bg-indigo-900/20 border border-indigo-800/40 px-4 py-3 hover:bg-indigo-900/30 transition-colors",
+              safetyModeLoading ? "opacity-50 cursor-not-allowed" : "cursor-pointer"
+            )}
             onClick={toggleSafetyMode}
           >
             <div className="flex items-center gap-2">

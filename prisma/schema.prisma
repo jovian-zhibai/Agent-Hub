@@ -94,6 +94,7 @@ model Agent {
   monthlyBudget Decimal?    @map("monthly_budget")
   monthlySpent  Decimal     @default(0) @map("monthly_spent")
   enabled       Boolean     @default(true)
+  disabledReason String?     @map("disabled_reason") // "budget_exceeded" | "manual" | null
   projectName   String      @default("") @map("project_name")
   projectPath   String?     @map("project_path")
   createdAt     DateTime    @default(now()) @map("created_at")

@@ -8,7 +8,8 @@ import {
   useCallback,
   type ReactNode,
 } from "react";
-import { auth as authApi } from "@/lib/api";
+import { useRouter } from "next/navigation";
+import { auth as authApi, API_BASE } from "@/lib/api";
 
 // ── Types ──────────────────────────────────────
 
@@ -37,6 +38,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   const [token, setToken] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const router = useRouter();
 
   // Restore session on mount
   useEffect(() => {
@@ -97,12 +99,22 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     [persistUser]
   );
 
-  const logout = useCallback(() => {
+  const logout = useCallback(async () => {
+    // Best-effort: clear the HttpOnly refresh token cookie server-side
+    try {
+      await fetch(`${API_BASE}/v1/auth/logout`, {
+        method: "POST",
+        credentials: "include",
+      });
+    } catch {
+      // Network error — clear local state regardless
+    }
     localStorage.removeItem("auth_token");
     localStorage.removeItem("auth_user");
     setToken(null);
     setUser(null);
-  }, []);
+    router.push("/login");
+  }, [router]);
 
   return (
     <AuthContext.Provider

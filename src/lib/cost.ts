@@ -62,9 +62,13 @@ export interface ExtractedTokens {
 /**
  * Load the active model pricing table into a lookup map.
  *
- * Behavior matches the (previously duplicated) block in 5
- * routes: first occurrence of a modelName wins, prices are
- * USD-per-1M-tokens.
+ * Keys are populated in two forms:
+ *   - `${providerId}:${modelName}` — exact match when caller knows providerId
+ *   - `${modelName}`               — fallback for events without providerId
+ *
+ * First occurrence of a bare modelName wins (preserves prior behavior for
+ * routes that don't pass providerId). Provider-scoped keys always overwrite
+ * so the latest active Model row for that provider wins.
  *
  * @param includeDisplayName set true when the caller renders
  *   model names (dashboard, cost-breakdown).
@@ -80,17 +84,23 @@ export async function loadPricingMap(
       displayName: options?.includeDisplayName ?? false,
       pricingInput: true,
       pricingOutput: true,
+      providerId: true,
     },
   });
 
   const pricingMap: PricingMap = new Map();
   for (const m of allModels) {
-    if (pricingMap.has(m.modelName)) continue;
-    pricingMap.set(m.modelName, {
+    const entry: PricingEntry = {
       ...(options?.includeDisplayName ? { displayName: m.displayName } : {}),
       pricingInput: Number(m.pricingInput),
       pricingOutput: Number(m.pricingOutput),
-    });
+    };
+    // Primary key: providerId:modelName (exact match)
+    pricingMap.set(`${m.providerId}:${m.modelName}`, entry);
+    // Fallback key: modelName only (for events without providerId)
+    if (!pricingMap.has(m.modelName)) {
+      pricingMap.set(m.modelName, entry);
+    }
   }
   return pricingMap;
 }
@@ -156,10 +166,12 @@ export function extractTokens(
 export function computeEventCost(
   payload: Record<string, unknown> | TokenUsagePayload | null | undefined,
   pricingMap: PricingMap,
+  providerId?: string,
 ): { cost: number; tokensIn: number; tokensOut: number; model: string } {
   const { tokensIn, tokensOut, model } = extractTokens(payload);
 
-  const pricing = pricingMap.get(model);
+  // Try provider-specific key first, fall back to model-name-only
+  const pricing = (providerId && pricingMap.get(`${providerId}:${model}`)) || pricingMap.get(model);
   if (!pricing) {
     return { cost: 0, tokensIn, tokensOut, model };
   }

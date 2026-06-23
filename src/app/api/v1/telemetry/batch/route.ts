@@ -97,15 +97,14 @@ export async function POST(request: NextRequest) {
 
     // S3: Validate keyId ownership — prevent cross-user balance tampering
     const eventsWithKey = validEvents.filter((e) => e.keyId);
+    let keyProviderMap = new Map<string, string>();
     if (eventsWithKey.length > 0) {
-      const userKeyIds = new Set(
-        (
-          await prisma.key.findMany({
-            where: { accountId: userId },
-            select: { id: true },
-          })
-        ).map((k) => k.id),
-      );
+      const userKeys = await prisma.key.findMany({
+        where: { accountId: userId },
+        select: { id: true, providerId: true },
+      });
+      const userKeyIds = new Set(userKeys.map((k) => k.id));
+      keyProviderMap = new Map(userKeys.map((k) => [k.id, k.providerId]));
       // Drop events whose keyId doesn't belong to this user
       for (let i = validEvents.length - 1; i >= 0; i--) {
         const e = validEvents[i];
@@ -204,7 +203,8 @@ export async function POST(request: NextRequest) {
 
               // B1/B2: update agent monthlySpent on token usage
               if (isTokenUsage) {
-                const { cost, tokensIn, tokensOut } = computeEventCost(event.payload, pricingMap);
+                const providerId = event.keyId ? keyProviderMap.get(event.keyId) : undefined;
+                const { cost, tokensIn, tokensOut } = computeEventCost(event.payload, pricingMap, providerId);
 
                 // S4: Use update return value (atomic) instead of read-then-write
                 const updatedAgent = await tx.agent.update({

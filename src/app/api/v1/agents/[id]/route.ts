@@ -248,9 +248,16 @@ export async function PATCH(
     // B11: Use zod validation instead of manual field extraction
     const data = validate(updateAgentSchema, body);
 
+    const updateData: Record<string, unknown> = { ...data };
+    if (data.enabled === false) {
+      updateData.disabledReason = "manual";
+    } else if (data.enabled === true) {
+      updateData.disabledReason = null;
+    }
+
     const updated = await prisma.agent.update({
       where: { id },
-      data,
+      data: updateData as any,
     });
 
     return NextResponse.json({

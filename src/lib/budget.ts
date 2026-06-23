@@ -152,6 +152,7 @@ export async function enforceAgentBudget(
       data: {
         enabled: false,
         status: "disabled",
+        disabledReason: "budget_exceeded",
       },
     });
 

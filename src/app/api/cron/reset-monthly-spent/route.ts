@@ -44,8 +44,6 @@ export async function GET(request: NextRequest) {
 
   try {
     // ── Reset monthlySpent for all agents ────
-    // Also re-enable agents that were auto-disabled by budget
-    // enforcement (B1) so they get a fresh start each month.
     const result = await prisma.agent.updateMany({
       where: {},
       data: {
@@ -53,14 +51,30 @@ export async function GET(request: NextRequest) {
       },
     });
 
+    // ── Re-enable agents that were auto-disabled by budget ──
+    // Only agents with disabledReason="budget_exceeded" get a fresh
+    // start each month. Manually-disabled agents stay disabled.
+    const reenabled = await prisma.agent.updateMany({
+      where: {
+        disabledReason: "budget_exceeded",
+        enabled: false,
+      },
+      data: {
+        enabled: true,
+        status: "running",
+        disabledReason: null,
+      },
+    });
+
     console.log(
-      `[cron/reset-monthly-spent] Reset monthlySpent for ${result.count} agent(s)`,
+      `[cron/reset-monthly-spent] Reset monthlySpent for ${result.count} agent(s); re-enabled ${reenabled.count} budget-disabled agent(s)`,
     );
 
     return NextResponse.json(
       {
         code: "OK",
         reset: result.count,
+        reenabled: reenabled.count,
         resetAt: new Date().toISOString(),
       },
       { status: 200 },

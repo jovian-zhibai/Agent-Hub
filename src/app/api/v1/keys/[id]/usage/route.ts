@@ -97,6 +97,7 @@ export async function GET(
         health: true,
         initialBalance: true,
         burnRate: true,
+        providerId: true,
         provider: { select: { name: true } },
       },
     });
@@ -165,6 +166,7 @@ export async function GET(
       const { cost, tokensIn, tokensOut } = computeEventCost(
         event.payload as Record<string, unknown>,
         pricingMap,
+        key.providerId,
       );
 
       totalCost += cost;
