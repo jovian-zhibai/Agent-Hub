@@ -29,28 +29,30 @@ interface PluginConfig {
 const degradedLogged = new Set<string>();
 
 // ──────────────────────────────────────────────
-// Plugin Definition
+// Plugin Hooks Definition
+//
+// 注意：opencode 插件函数必须直接返回 Hooks 对象（包含 hook 函数），
+// 不能返回 { name, description, hooks } 包装——opencode 会从返回对象
+// 里直接找 "permission.ask" 等 hook 函数，多一层 hooks 包装会导致
+// hook 永远不被触发。
+// 参考：~/.config/opencode/plugins/herdr-agent-state.js 直接返回 Hooks 对象
 // ──────────────────────────────────────────────
 
-const opencodePlugin: Plugin = {
-  name: "agent-hub",
-  description: "Agent Hub 安全护栏 — 权限检查、工具调用上报、Token 用量追踪",
-
-  hooks: {
-    /**
-     * Hook 1：permission.ask — 权限拦截（核心）
-     *
-     * 在 Agent 每次请求权限时触发。
-     * 1. 初始化 SDK（LocalCache + PermissionChecker）
-     * 2. 调 PermissionChecker.check() 做本地规则匹配
-     * 3. 根据决策结果设置 output.status
-     * 4. 若被拒绝，上报 TelemetryEvent
-     * 5. SDK 异常/超时 → 降级策略（三条）：
-     *    a. 只在"够不到 hub"时放行；hub 明确返回 deny 必须照办
-     *    b. safety mode 开启时 fail-closed
-     *    c. 每次降级放行大声记 stderr 日志 + 顺手 enqueue permission_degraded 事件（可能丢）
-     */
-    "permission.ask": async (perm: Permission, output: { status: string }) => {
+const opencodeHooks = {
+  /**
+   * Hook 1：permission.ask — 权限拦截（核心）
+   *
+   * 在 Agent 每次请求权限时触发。
+   * 1. 初始化 SDK（LocalCache + PermissionChecker）
+   * 2. 调 PermissionChecker.check() 做本地规则匹配
+   * 3. 根据决策结果设置 output.status
+   * 4. 若被拒绝，上报 TelemetryEvent
+   * 5. SDK 异常/超时 → 降级策略（三条）：
+   *    a. 只在"够不到 hub"时放行；hub 明确返回 deny 必须照办
+   *    b. safety mode 开启时 fail-closed
+   *    c. 每次降级放行大声记 stderr 日志 + 顺手 enqueue permission_degraded 事件（可能丢）
+   */
+  "permission.ask": async (perm: Permission, output: { status: string }) => {
       // 调试：写文件确认 hook 被触发（console.log 可能不进 opencode.log）
       try {
         fs.appendFileSync("/tmp/agent-hub-plugin.log", `[${new Date().toISOString()}] permission.ask triggered: tool=${JSON.stringify(perm).slice(0,200)}\n`);
@@ -174,14 +176,14 @@ const opencodePlugin: Plugin = {
     // 注意：opencode 插件 API 没有 "llm.completion" hook
     // Token 用量追踪暂时通过 tool.execute.after 或 chat.message 实现（后续）
     // 当前阶段只做权限检查 + 工具调用上报
-  },
 };
 
-// OpenCode 插件必须导出为函数（可以是 async），调用后返回插件对象
+// OpenCode 插件必须导出为函数（可以是 async），调用后返回 Hooks 对象
 // 参考 ~/.config/opencode/plugins/herdr-agent-state.js 的格式
+// 注意：必须直接返回 Hooks 对象（包含 hook 函数），不能返回 { name, hooks } 包装
 // 直接导出对象会报 "Plugin export is not a function"
 export default async function agentHubPlugin() {
-  return opencodePlugin;
+  return opencodeHooks;
 }
 
 // ──────────────────────────────────────────────
