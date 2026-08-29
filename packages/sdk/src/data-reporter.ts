@@ -74,6 +74,18 @@ export class DataReporter {
     this.cache = new LocalCache();
   }
 
+  /**
+   * 将内部事件格式转换为服务端期望的 wire format。
+   * 内部用 `type`，服务端 Zod schema 期望 `eventType`。
+   */
+  private toWireFormat(event: TelemetryEvent): Record<string, unknown> {
+    const { type, ...rest } = event;
+    return {
+      ...rest,
+      eventType: type,
+    };
+  }
+
   // ── Public API ───────────────────────────────
 
   /**
@@ -116,10 +128,10 @@ export class DataReporter {
     try {
       this.sending = true;
       const body = JSON.stringify({
-        events: [{
+        events: [this.toWireFormat({
           ...eventWithId,
           timestamp: eventWithId.timestamp || Date.now(),
-        }]
+        } as TelemetryEvent)],
       });
 
       const response = await fetch(`${this.config.apiBaseUrl}/api/v1/telemetry/batch`, {
@@ -267,7 +279,7 @@ export class DataReporter {
         "User-Agent": "agent-hub-sdk/1.0",
       },
       body: JSON.stringify({
-        events: batch,
+        events: batch.map((e) => this.toWireFormat(e)),
         agentId: this.config.agentId,
         sentAt: Date.now(),
       }),
@@ -307,7 +319,7 @@ export class DataReporter {
           "User-Agent": "agent-hub-sdk/1.0",
         },
         body: JSON.stringify({
-          events: [event],
+          events: [this.toWireFormat(event)],
           agentId: this.config.agentId,
           sentAt: Date.now(),
         }),
