@@ -7,6 +7,7 @@
 import type { Plugin, Permission, ToolExecuteInput } from "@opencode-ai/plugin";
 import * as path from "node:path";
 import * as os from "node:os";
+import * as fs from "node:fs";
 import { LocalCache } from "../local-cache";
 import { PermissionChecker, type CheckDecision } from "../permission-checker";
 import { KeyManager } from "../key-manager";
@@ -211,6 +212,27 @@ let sdkInstance: {
 
 let sdkConfig: PluginConfig | null = null;
 let initPromise: Promise<typeof sdkInstance> | null = null;
+
+// 模块加载时同步读一次 config，消除 agentId/authToken 的初始化竞态
+// （permission.ask 是 async，第一条 tool.execute.before 可能在 initSDK 完成前触发，
+//  导致 payload agentId=""、reporter authToken="" → 外键失败 + 401）
+(function loadConfigSync() {
+  try {
+    const p = path.join(os.homedir(), ".agent-hub", "config.json");
+    const parsed = JSON.parse(fs.readFileSync(p, "utf-8"));
+    // 兼容 CacheEntry 包装（{version, expiresAt, data, createdAt}）与裸对象
+    const data = parsed?.data ?? parsed;
+    if (data?.agentId) {
+      sdkConfig = {
+        apiBaseUrl: data.apiBaseUrl ?? "http://localhost:3000",
+        authToken: data.authToken ?? "",
+        agentId: data.agentId,
+      };
+    }
+  } catch {
+    // 静默，交给惰性初始化兜底
+  }
+})();
 
 /**
  * 惰性初始化 SDK 各模块。

@@ -14,6 +14,7 @@
 
 import { PrismaClient } from "../generated/prisma/client";
 import { PrismaPg } from "@prisma/adapter-pg";
+import { LocalCache } from "../packages/sdk/src/local-cache";
 import bcrypt from "bcryptjs";
 import jwt from "jsonwebtoken";
 import fs from "node:fs";
@@ -152,21 +153,19 @@ async function main() {
     { expiresIn: "2h" },
   );
 
-  // 4. 写 config.json
+  // 4. 写 config.json（用 LocalCache.set 包装 CacheEntry，与插件读取逻辑对齐）
   console.log("\n📋 步骤 4: 写 ~/.agent-hub/config.json...");
-  fs.mkdirSync(CONFIG_DIR, { recursive: true });
 
-  const config = {
+  const cache = new LocalCache(CONFIG_DIR);
+  await cache.set("config", {
     apiBaseUrl: "http://localhost:3000",
-    authToken: accessToken,
-    agentToken,
+    authToken: agentToken,   // 用 365 天 agent token（type=agent），不是 2h accessToken
     agentId: agent.id,
     agentName: agent.name,
     machineId: agent.machineId || machineId,
-  };
+  });
 
-  fs.writeFileSync(CONFIG_PATH, JSON.stringify(config, null, 2), "utf-8");
-  console.log(`   ✅ config.json 已写入: ${CONFIG_PATH}`);
+  console.log(`   ✅ config.json 已写入（CacheEntry 包装，authToken=agentToken 365天）: ${CONFIG_PATH}`);
 
   // ── 验证 ──────────────────────────────────
   console.log("\n🔍 验证...");
@@ -187,6 +186,29 @@ async function main() {
   // 验证 Account 在库里
   const accountCount = await prisma.account.count({ where: { id: account.id } });
   console.log(`   ✅ Account 库记录: ${accountCount} 条`);
+
+  // 验证 config 能被 LocalCache 读到（插件用同样的方式读）
+  const readback = await cache.get<{ authToken: string; agentId: string }>("config");
+  if (!readback) {
+    console.error("   ❌ config 读回失败（LocalCache.get 返回 null）—— 插件将读不到配置");
+    process.exit(1);
+  }
+  if (readback.agentId !== agent.id) {
+    console.error(`   ❌ config agentId 不匹配: 期望 ${agent.id}, 实际 ${readback.agentId}`);
+    process.exit(1);
+  }
+  // 验证 authToken 是 agent token（type=agent），不是 access token
+  try {
+    const decoded = jwt.verify(readback.authToken, JWT_SECRET) as { type: string };
+    if (decoded.type !== "agent") {
+      console.error(`   ❌ config authToken 类型错误: 期望 agent, 实际 ${decoded.type}`);
+      process.exit(1);
+    }
+    console.log(`   ✅ config 读回成功: authToken type=agent, agentId=${readback.agentId.slice(0, 8)}...`);
+  } catch (err) {
+    console.error(`   ❌ config authToken 解析失败: ${(err as Error).message}`);
+    process.exit(1);
+  }
 
   console.log("\n🎉 Seed 完成！");
   console.log(`   Account: ${account.email}`);
