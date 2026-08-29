@@ -214,11 +214,14 @@ export class DataReporter {
     this.batchTimer = setInterval(() => {
       this.reportBatch().catch(() => {});
     }, BATCH_INTERVAL_MS);
+    // unref: 让定时器不阻止 Node.js 进程退出（否则 OpenCode/Pi 退不出去）
+    this.batchTimer.unref?.();
 
     // Heartbeat: report liveness every 30s
     this.heartbeatTimer = setInterval(() => {
       this.sendHeartbeat().catch(() => {});
     }, HEARTBEAT_INTERVAL_MS);
+    this.heartbeatTimer.unref?.();
 
     // Send an initial heartbeat immediately
     await this.sendHeartbeat();

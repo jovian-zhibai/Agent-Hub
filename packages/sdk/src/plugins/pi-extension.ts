@@ -185,10 +185,10 @@ export default function (pi: any) {
   });
 
   // ── Hook 3: message_end → token_usage 事件 ──
-  // 注意：token 用量字段名待实测确认。
-  // MessageEndEvent { type: "message_end", message: AgentMessage }
-  // AgentMessage 可能带 usage 字段（字段路径待确认）。
-  // 首次运行时把完整 payload 写进调试日志，确认字段路径后再精确提取。
+  // 已确认字段路径（2026-08-29 实测）：
+  // event.message.usage = { input, output, cacheRead, cacheWrite, reasoning, totalTokens, cost }
+  // event.message.role = "user" | "assistant" | "toolResult"
+  // 只上报 assistant 消息且 totalTokens > 0，跳过 user/toolResult 消息。
   pi.on("message_end", async (event: any) => {
     try {
       // 项目作用域
@@ -201,45 +201,45 @@ export default function (pi: any) {
 
       const msg = event?.message ?? {};
 
-      // 把完整 payload 写进调试日志，确认 token 字段路径
-      debugLog("message_end triggered (full payload)", {
-        eventKeys: Object.keys(event || {}),
-        messageKeys: Object.keys(msg || {}),
-        message: {
-          id: msg.id,
-          role: msg.role,
-          model: msg.model,
-          usage: msg.usage,
-          tokens: msg.tokens,
-          // 保留所有 key 方便确认字段路径
-          _allKeys: Object.keys(msg || {}),
-        },
-      });
-
-      // best-effort 提取 token 用量（字段名待实测确认）
-      const usage = msg?.usage || msg?.tokenUsage || msg?.tokens || {};
-      const promptTokens = usage?.promptTokens ?? usage?.input ?? usage?.prompt ?? 0;
-      const completionTokens = usage?.completionTokens ?? usage?.output ?? usage?.completion ?? 0;
-      const totalTokens = promptTokens + completionTokens;
-
-      // 跳过 0 token 的消息（比如系统消息）
-      if (totalTokens === 0 && !msg?.usage) {
+      // 只上报 assistant 消息（跳过 user/toolResult/system）
+      if (msg?.role !== "assistant") {
         return;
       }
+
+      // 用已确认的字段路径提取 token 用量
+      const usage = msg?.usage || {};
+      const promptTokens = usage?.input ?? 0;
+      const completionTokens = usage?.output ?? 0;
+      const totalTokens = usage?.totalTokens ?? (promptTokens + completionTokens);
+
+      // 跳过 0 token 的 assistant 消息（异常情况）
+      if (totalTokens === 0) {
+        return;
+      }
+
+      debugLog("message_end token_usage", {
+        model: msg?.model,
+        promptTokens,
+        completionTokens,
+        totalTokens,
+        cacheRead: usage?.cacheRead,
+        cacheWrite: usage?.cacheWrite,
+        reasoning: usage?.reasoning,
+      });
 
       r.reportImmediately({
         type: "token_usage",
         agentId: agentId || "",
         payload: {
           runtime: "pi",
-          model: msg?.model || event?.model || "unknown",
+          model: msg?.model || "unknown",
           messageId: msg?.id,
           promptTokens,
           completionTokens,
           totalTokens,
-          // 保留原始 usage 片段，方便后续确认字段名
-          _rawUsage: usage,
-          _rawMessageKeys: Object.keys(msg || {}).slice(0, 20),
+          cacheRead: usage?.cacheRead ?? 0,
+          cacheWrite: usage?.cacheWrite ?? 0,
+          reasoningTokens: usage?.reasoning ?? 0,
         },
         timestamp: Date.now(),
       }).catch(() => {});
@@ -247,4 +247,19 @@ export default function (pi: any) {
       // 上报失败不影响
     }
   });
+
+  // ── 退出时停止 DataReporter（防止定时器阻止进程退出）──
+  // DataReporter 的 timer 已加 .unref()，这里再显式 stop 作为双重保险。
+  const stopOnExit = () => {
+    try {
+      if (reporter) {
+        reporter.stop().catch(() => {});
+      }
+    } catch {
+      // ignore
+    }
+  };
+  process.on("beforeExit", stopOnExit);
+  process.on("SIGINT", () => { stopOnExit(); process.exit(0); });
+  process.on("SIGTERM", () => { stopOnExit(); process.exit(0); });
 }

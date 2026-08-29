@@ -68,6 +68,23 @@ const degradedLogged = new Set<string>();
 
 const opencodeHooks = {
   /**
+   * dispose — 插件卸载/进程退出时调用
+   *
+   * 必须停止 DataReporter 的定时器，否则 setInterval 会阻止 Node.js 进程退出
+   * （OpenCode 退不出去、Ctrl+C 没反应的根因）。
+   * DataReporter 的 timer 也加了 .unref() 作为双重保险。
+   */
+  dispose: async () => {
+    debugLog("dispose: stopping DataReporter");
+    try {
+      const { reporter } = getSDK();
+      await reporter.stop();
+    } catch {
+      // stop 失败不影响退出
+    }
+  },
+
+  /**
    * Hook 1：permission.ask — 权限拦截（核心）
    *
    * 在 Agent 每次请求权限时触发。
