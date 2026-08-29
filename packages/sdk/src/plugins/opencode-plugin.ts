@@ -200,7 +200,12 @@ const opencodePlugin: Plugin = {
   },
 };
 
-export default opencodePlugin;
+// OpenCode 插件必须导出为函数（可以是 async），调用后返回插件对象
+// 参考 ~/.config/opencode/plugins/herdr-agent-state.js 的格式
+// 直接导出对象会报 "Plugin export is not a function"
+export default async function agentHubPlugin() {
+  return opencodePlugin;
+}
 
 // ──────────────────────────────────────────────
 // SDK 初始化（惰性、单例）
