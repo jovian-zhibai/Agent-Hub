@@ -418,3 +418,27 @@ function mapOpenCodeToolType(toolName: string): string {
   };
   return map[toolName] ?? toolName.toLowerCase();
 }
+
+// ──────────────────────────────────────────────
+// 进程退出时停止 DataReporter（防止定时器/HTTP连接阻止退出）
+//
+// 三重保险：
+// 1. DataReporter 的 timer 加了 .unref()
+// 2. fetch 请求加了 Connection: close 头（禁用 keep-alive）
+// 3. 这里监听进程退出事件，显式调用 reporter.stop()
+//
+// 注意：OpenCode 的 Hooks 接口可能没有 dispose 字段（类型定义里找不到），
+// 所以用 process 事件作为兜底。
+// ──────────────────────────────────────────────
+function stopReporterOnExit() {
+  try {
+    const { reporter } = getSDK();
+    reporter.stop().catch(() => {});
+  } catch {
+    // ignore
+  }
+}
+
+process.on("beforeExit", stopReporterOnExit);
+process.on("SIGINT", () => { stopReporterOnExit(); process.exit(0); });
+process.on("SIGTERM", () => { stopReporterOnExit(); process.exit(0); });

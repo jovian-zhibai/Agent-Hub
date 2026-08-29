@@ -139,6 +139,7 @@ export class DataReporter {
         headers: {
           "Content-Type": "application/json",
           Authorization: `Bearer ${this.getBearerToken()}`,
+          "Connection": "close", // 禁用 keep-alive，防止 HTTP 连接阻止进程退出
         },
         body,
       });
@@ -280,6 +281,7 @@ export class DataReporter {
         "Content-Type": "application/json",
         Authorization: `Bearer ${this.getBearerToken()}`,
         "User-Agent": "agent-hub-sdk/1.0",
+        "Connection": "close", // 禁用 keep-alive，防止 HTTP 连接阻止进程退出
       },
       body: JSON.stringify({
         events: batch.map((e) => this.toWireFormat(e)),
@@ -320,6 +322,7 @@ export class DataReporter {
           "Content-Type": "application/json",
           Authorization: `Bearer ${this.getBearerToken()}`,
           "User-Agent": "agent-hub-sdk/1.0",
+          "Connection": "close", // 禁用 keep-alive，防止 HTTP 连接阻止进程退出
         },
         body: JSON.stringify({
           events: [this.toWireFormat(event)],
@@ -399,6 +402,9 @@ export class DataReporter {
   // ── Internal: Utilities ──────────────────────
 
   private sleep(ms: number): Promise<void> {
-    return new Promise((resolve) => setTimeout(resolve, ms));
+    return new Promise((resolve) => {
+      const timer = setTimeout(resolve, ms);
+      timer.unref?.(); // 不让重试延迟的 setTimeout 阻止进程退出
+    });
   }
 }
