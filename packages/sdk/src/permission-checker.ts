@@ -230,10 +230,14 @@ export class PermissionChecker {
   }
 
   /**
-   * Produce a "deny" result after a timeout.
+   * Timeout — throws instead of returning "deny".
+   *
+   * Why: returning "deny" would be indistinguishable from an explicit rule
+   * deny upstream. Throwing lets the plugin's catch block distinguish
+   * "hub unreachable / timeout" (degrade) from "hub explicitly denied" (obey).
    */
-  private async timeout(ms: number): Promise<"deny"> {
+  private async timeout(ms: number): Promise<never> {
     await new Promise((resolve) => setTimeout(resolve, ms));
-    return "deny";
+    throw new Error(`Permission check timed out after ${ms}ms`);
   }
 }

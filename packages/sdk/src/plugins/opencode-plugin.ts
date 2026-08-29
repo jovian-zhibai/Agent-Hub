@@ -22,6 +22,11 @@ interface PluginConfig {
   agentId: string;
 }
 
+// 节流：同一工具的降级日志只打第一次，避免刷屏
+// （PermissionChecker.check() 是纯本地规则匹配，"够不到 hub"只在冷初始化触发，
+//  所以这个 Set 基本不会增长，但留着防极端情况）
+const degradedLogged = new Set<string>();
+
 // ──────────────────────────────────────────────
 // Plugin Definition
 // ──────────────────────────────────────────────
@@ -39,7 +44,10 @@ const opencodePlugin: Plugin = {
      * 2. 调 PermissionChecker.check() 做本地规则匹配
      * 3. 根据决策结果设置 output.status
      * 4. 若被拒绝，上报 TelemetryEvent
-     * 5. SDK 异常/超时 → 默认 deny（安全优先）
+     * 5. SDK 异常/超时 → 降级策略（三条）：
+     *    a. 只在"够不到 hub"时放行；hub 明确返回 deny 必须照办
+     *    b. safety mode 开启时 fail-closed
+     *    c. 每次降级放行大声记 stderr 日志 + 顺手 enqueue permission_degraded 事件（可能丢）
      */
     "permission.ask": async (perm: Permission, output: { status: string }) => {
       try {
@@ -52,6 +60,7 @@ const opencodePlugin: Plugin = {
           safetyMode: perm.safetyMode,
         });
 
+        // hub 明确返回的决策，照办
         if (decision === "allow") {
           output.status = "allow";
         } else if (decision === "deny") {
@@ -75,11 +84,50 @@ const opencodePlugin: Plugin = {
           output.status = "ask";
         }
       } catch (err) {
-        // SDK 崩溃 → 默认 deny（安全优先）
-        console.warn(
-          `[AgentHub] Permission check failed, defaulting to deny: ${err instanceof Error ? err.message : String(err)}`,
-        );
-        output.status = "deny";
+        // 够不到 hub（SDK 初始化失败 / checker 超时 / 缓存不可读）
+        // 降级策略：safety mode 开 → fail-closed；关 → 放行 + 大声日志 + 事件补传
+        const safetyOn = perm.safetyMode === true;
+        const toolName = perm.toolName ?? "unknown";
+
+        if (safetyOn) {
+          // safety mode 开启 → fail-closed（不能偷偷放行）
+          if (!degradedLogged.has(toolName)) {
+            degradedLogged.add(toolName);
+            console.warn(
+              `[AgentHub] PERMISSION FAIL-CLOSED: hub unreachable + safetyMode=on, denying tool=${toolName}`,
+            );
+          }
+          output.status = "deny";
+        } else {
+          // safety mode 关闭 → 降级放行
+          if (!degradedLogged.has(toolName)) {
+            degradedLogged.add(toolName);
+            console.warn(
+              `[AgentHub] PERMISSION DEGRADED: hub unreachable, allowing tool=${toolName} (safetyMode=off)`,
+            );
+          }
+          output.status = "allow";
+
+          // 顺手 enqueue permission_degraded 事件，靠 DataReporter 批量窗口在 hub 恢复后补传（可能丢）
+          try {
+            const { reporter } = getSDK();
+            reporter
+              .reportEvent({
+                type: "permission_degraded",
+                agentId: sdkConfig?.agentId ?? "",
+                payload: {
+                  toolName,
+                  toolInput: perm.toolInput,
+                  reason: err instanceof Error ? err.message : String(err),
+                  safetyMode: safetyOn,
+                },
+                timestamp: Date.now(),
+              })
+              .catch(() => {});
+          } catch {
+            // 事件补传失败不影响降级放行
+          }
+        }
       }
     },
 

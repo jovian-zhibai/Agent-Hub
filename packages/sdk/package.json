@@ -13,6 +13,10 @@
     "./opencode-plugin": {
       "types": "./dist/plugins/opencode-plugin.d.ts",
       "import": "./dist/plugins/opencode-plugin.js"
+    },
+    "./pi-extension": {
+      "types": "./dist/plugins/pi-extension.d.ts",
+      "import": "./dist/plugins/pi-extension.js"
     }
   },
   "files": [
