@@ -18,6 +18,9 @@ export default defineConfig({
   sourcemap: true,
   clean: true,
   target: "es2022",
+  // Disable code splitting so each plugin entry is a standalone single file
+  // (can be dropped into ~/.config/opencode/plugins/ without relative chunk imports)
+  splitting: false,
   // Keep @opencode-ai/plugin as external (peer dep)
   external: ["@opencode-ai/plugin"],
 });
