@@ -51,7 +51,11 @@ const opencodePlugin: Plugin = {
      *    c. 每次降级放行大声记 stderr 日志 + 顺手 enqueue permission_degraded 事件（可能丢）
      */
     "permission.ask": async (perm: Permission, output: { status: string }) => {
-      console.log("[agent-hub] hook triggered: permission.ask", perm.toolName);
+      // 调试：写文件确认 hook 被触发（console.log 可能不进 opencode.log）
+      try {
+        fs.appendFileSync("/tmp/agent-hub-plugin.log", `[${new Date().toISOString()}] permission.ask triggered: tool=${JSON.stringify(perm).slice(0,200)}\n`);
+      } catch {}
+      console.log("[agent-hub] hook triggered: permission.ask");
       try {
         const { checker, reporter } = await getOrInitSDK();
 
@@ -139,8 +143,12 @@ const opencodePlugin: Plugin = {
      * 在 Agent 执行工具调用前触发。
      * 异步上报工具调用事件，不 await，不阻塞主流程。
      */
-    "tool.execute.before": (_input: ToolExecuteInput, _output: Record<string, unknown>) => {
-      console.log("[agent-hub] hook triggered: tool.execute.before", _input.toolName);
+    "tool.execute.before": (input: { tool: string; sessionID: string; callID: string }, output: { args: any }) => {
+      // 调试：写文件确认 hook 被触发
+      try {
+        fs.appendFileSync("/tmp/agent-hub-plugin.log", `[${new Date().toISOString()}] tool.execute.before triggered: tool=${input.tool}, sessionID=${input.sessionID}\n`);
+      } catch {}
+      console.log("[agent-hub] hook triggered: tool.execute.before", input.tool);
       try {
         const { reporter } = getSDK();
 
@@ -150,10 +158,10 @@ const opencodePlugin: Plugin = {
             type: "tool_call",
             agentId: sdkConfig?.agentId ?? "",
             payload: {
-              toolName: _input.toolName,
-              toolInput: _input.toolInput,
-              sessionId: _input.sessionId,
-              conversationId: _input.conversationId,
+              toolName: input.tool,
+              toolInput: output.args,
+              sessionId: input.sessionID,
+              callID: input.callID,
             },
             timestamp: Date.now(),
           })
@@ -163,40 +171,9 @@ const opencodePlugin: Plugin = {
       }
     },
 
-    /**
-     * Hook 3：llm.completion — Token 用量上报
-     *
-     * 在 LLM 完成一次生成后触发。
-     * 即时上报 Token 用量，不等待批量窗口。
-     */
-    "llm.completion": (
-      _input: { prompt: string; promptTokens?: number; completionTokens?: number; model?: string },
-      _output: { completion: string },
-    ) => {
-      console.log("[agent-hub] hook triggered: llm.completion", _input.model, "tokens:", (_input.promptTokens ?? 0) + (_input.completionTokens ?? 0));
-      try {
-        const { reporter } = getSDK();
-        const promptTokens = _input.promptTokens ?? 0;
-        const completionTokens = _input.completionTokens ?? 0;
-
-        // 即时上报，不等待批量窗口
-        reporter
-          .reportImmediately({
-            type: "token_usage",
-            agentId: sdkConfig?.agentId ?? "",
-            payload: {
-              model: _input.model ?? "unknown",
-              promptTokens,
-              completionTokens,
-              totalTokens: promptTokens + completionTokens,
-            },
-            timestamp: Date.now(),
-          })
-          .catch(() => {});
-      } catch {
-        // 上报失败不阻塞
-      }
-    },
+    // 注意：opencode 插件 API 没有 "llm.completion" hook
+    // Token 用量追踪暂时通过 tool.execute.after 或 chat.message 实现（后续）
+    // 当前阶段只做权限检查 + 工具调用上报
   },
 };
 
