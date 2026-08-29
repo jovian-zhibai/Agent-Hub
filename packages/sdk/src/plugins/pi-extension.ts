@@ -25,10 +25,13 @@ const DEBUG = process.env.AGENT_HUB_DEBUG === "1";
 
 function debugLog(message: string, data?: unknown): void {
   if (!DEBUG) return;
-  const line = `[${new Date().toISOString()}] [pi] ${message}${data !== undefined ? " " + JSON.stringify(data).slice(0, 400) : ""}\n`;
-  // 只写文件，绝不写 stdout/stderr（TUI 下 console 会冲乱屏幕和输入行）
-  // 异步追加，不阻塞主线程
-  fs.appendFile("/tmp/agent-hub-plugin.log", line, () => {});
+  try {
+    const dataStr = data !== undefined ? " " + JSON.stringify(data).slice(0, 400) : "";
+    const line = `[${new Date().toISOString()}] [pi] ${message}${dataStr}\n`;
+    fs.appendFile("/tmp/agent-hub-plugin.log", line, () => {});
+  } catch {
+    // JSON.stringify 可能抛循环引用，忽略
+  }
 }
 
 // ──────────────────────────────────────────────
@@ -265,3 +268,15 @@ export default function (pi: any) {
   // 而且 process.exit(0) 会打断 Pi 自己的收尾流程。
   process.on("beforeExit", stopOnExit);
 }
+
+// ──────────────────────────────────────────────
+// 进程级兜底：防止任何漏网的 unhandledRejection 打到 stderr 污染 TUI
+// 静默；真要看错误就写文件（AGENT_HUB_DEBUG=1 时）
+// ──────────────────────────────────────────────
+process.on("unhandledRejection", (reason) => {
+  if (DEBUG) {
+    const line = `[${new Date().toISOString()}] [pi] unhandledRejection: ${reason instanceof Error ? reason.message : String(reason)}\n`;
+    fs.appendFile("/tmp/agent-hub-plugin.log", line, () => {});
+  }
+  // 静默，不打 stderr，不 process.exit
+});

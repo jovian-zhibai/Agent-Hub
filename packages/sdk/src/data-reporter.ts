@@ -253,7 +253,7 @@ export class DataReporter {
     this.heartbeatTimer.unref?.();
 
     // Send an initial heartbeat immediately (fire-and-forget，不阻塞启动)
-    void this.sendHeartbeat();
+    void this.sendHeartbeat().catch(() => {});
   }
 
   /**
