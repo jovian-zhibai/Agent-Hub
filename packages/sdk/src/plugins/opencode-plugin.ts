@@ -51,6 +51,7 @@ const opencodePlugin: Plugin = {
      *    c. 每次降级放行大声记 stderr 日志 + 顺手 enqueue permission_degraded 事件（可能丢）
      */
     "permission.ask": async (perm: Permission, output: { status: string }) => {
+      console.log("[agent-hub] hook triggered: permission.ask", perm.toolName);
       try {
         const { checker, reporter } = await getOrInitSDK();
 
@@ -139,6 +140,7 @@ const opencodePlugin: Plugin = {
      * 异步上报工具调用事件，不 await，不阻塞主流程。
      */
     "tool.execute.before": (_input: ToolExecuteInput, _output: Record<string, unknown>) => {
+      console.log("[agent-hub] hook triggered: tool.execute.before", _input.toolName);
       try {
         const { reporter } = getSDK();
 
@@ -171,6 +173,7 @@ const opencodePlugin: Plugin = {
       _input: { prompt: string; promptTokens?: number; completionTokens?: number; model?: string },
       _output: { completion: string },
     ) => {
+      console.log("[agent-hub] hook triggered: llm.completion", _input.model, "tokens:", (_input.promptTokens ?? 0) + (_input.completionTokens ?? 0));
       try {
         const { reporter } = getSDK();
         const promptTokens = _input.promptTokens ?? 0;
