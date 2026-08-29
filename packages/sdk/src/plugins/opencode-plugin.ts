@@ -317,17 +317,19 @@ function getSDK(): {
 } {
   if (sdkInstance) return sdkInstance;
 
-  // 临时降级实例
+  // 临时降级实例：用 sdkConfig（模块加载时已同步读取），而不是写死空值
+  // 之前写死 authToken:"" / agentId:"" 导致 401，即时上报失败
   const cache = new LocalCache();
+  const config = sdkConfig ?? {
+    apiBaseUrl: "http://localhost:3000",
+    authToken: "",
+    agentId: "",
+  };
   return {
     cache,
     checker: new PermissionChecker(cache),
     keyManager: new KeyManager(cache),
-    reporter: new DataReporter({
-      apiBaseUrl: "http://localhost:3000",
-      authToken: "",
-      agentId: "",
-    }),
+    reporter: new DataReporter(config),
   };
 }
 
