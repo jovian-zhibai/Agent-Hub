@@ -1,10 +1,16 @@
 // ──────────────────────────────────────────────
 // Agent Hub SDK — OpenCode Plugin
 // 插件适配层：注入到 @opencode-ai/plugin 进程，
-// 自动注册 permission.ask / tool.execute.before / llm.completion 三个 hook
+// 注册 permission.ask / tool.execute.before / event 三个 hook
+//
+// 经验教训（2026-08-29）：
+// - hook 名和字段名必须读 node_modules 里的真实类型/源码枚举，不许照文档猜
+// - "llm.completion" hook 不存在；token 用量从 event hook 的 message.updated 事件取
+// - 插件函数必须直接返回 Hooks 对象，不能返回 { name, hooks } 包装
+// - getSDK() 降级实例必须用 sdkConfig，不能写死空 token（否则 401）
 // ──────────────────────────────────────────────
 
-import type { Plugin, Permission, ToolExecuteInput } from "@opencode-ai/plugin";
+import type { Plugin, Permission } from "@opencode-ai/plugin";
 import * as path from "node:path";
 import * as os from "node:os";
 import * as fs from "node:fs";
@@ -12,6 +18,31 @@ import { LocalCache } from "../local-cache";
 import { PermissionChecker, type CheckDecision } from "../permission-checker";
 import { KeyManager } from "../key-manager";
 import { DataReporter } from "../data-reporter";
+
+// ──────────────────────────────────────────────
+// 调试开关：AGENT_HUB_DEBUG=1 才输出调试日志
+// ──────────────────────────────────────────────
+const DEBUG = process.env.AGENT_HUB_DEBUG === "1";
+
+function debugLog(message: string, data?: unknown): void {
+  if (!DEBUG) return;
+  const line = `[${new Date().toISOString()}] ${message}${data !== undefined ? " " + JSON.stringify(data).slice(0, 300) : ""}`;
+  console.log(`[agent-hub] ${line}`);
+  try {
+    fs.appendFileSync("/tmp/agent-hub-plugin.log", line + "\n");
+  } catch {
+    // 写文件失败不影响主流程
+  }
+}
+
+// ──────────────────────────────────────────────
+// 项目作用域：只有 opc-agents 项目的会话才上报
+// 其他项目完全透明：不上报、不拦工具（fail-open）
+// ──────────────────────────────────────────────
+function isOpcAgentsProject(cwd?: string): boolean {
+  const dir = cwd ?? process.cwd();
+  return dir.includes("opc-agents") || dir.includes("opc_agents");
+}
 
 // ──────────────────────────────────────────────
 // Types
@@ -24,8 +55,6 @@ interface PluginConfig {
 }
 
 // 节流：同一工具的降级日志只打第一次，避免刷屏
-// （PermissionChecker.check() 是纯本地规则匹配，"够不到 hub"只在冷初始化触发，
-//  所以这个 Set 基本不会增长，但留着防极端情况）
 const degradedLogged = new Set<string>();
 
 // ──────────────────────────────────────────────
@@ -35,7 +64,6 @@ const degradedLogged = new Set<string>();
 // 不能返回 { name, description, hooks } 包装——opencode 会从返回对象
 // 里直接找 "permission.ask" 等 hook 函数，多一层 hooks 包装会导致
 // hook 永远不被触发。
-// 参考：~/.config/opencode/plugins/herdr-agent-state.js 直接返回 Hooks 对象
 // ──────────────────────────────────────────────
 
 const opencodeHooks = {
@@ -43,145 +71,191 @@ const opencodeHooks = {
    * Hook 1：permission.ask — 权限拦截（核心）
    *
    * 在 Agent 每次请求权限时触发。
-   * 1. 初始化 SDK（LocalCache + PermissionChecker）
-   * 2. 调 PermissionChecker.check() 做本地规则匹配
-   * 3. 根据决策结果设置 output.status
-   * 4. 若被拒绝，上报 TelemetryEvent
-   * 5. SDK 异常/超时 → 降级策略（三条）：
-   *    a. 只在"够不到 hub"时放行；hub 明确返回 deny 必须照办
-   *    b. safety mode 开启时 fail-closed
-   *    c. 每次降级放行大声记 stderr 日志 + 顺手 enqueue permission_degraded 事件（可能丢）
+   * 非 opc-agents 项目：直接返回，不拦截（fail-open）。
    */
   "permission.ask": async (perm: Permission, output: { status: string }) => {
-      // 调试：写文件确认 hook 被触发（console.log 可能不进 opencode.log）
-      try {
-        fs.appendFileSync("/tmp/agent-hub-plugin.log", `[${new Date().toISOString()}] permission.ask triggered: tool=${JSON.stringify(perm).slice(0,200)}\n`);
-      } catch {}
-      console.log("[agent-hub] hook triggered: permission.ask");
-      try {
-        const { checker, reporter } = await getOrInitSDK();
+    // 项目作用域：非 opc-agents 项目不拦截
+    const cwd = (perm as any)?.cwd ?? (perm as any)?.path?.cwd;
+    if (!isOpcAgentsProject(cwd)) {
+      debugLog("permission.ask skipped (not opc-agents project)", { cwd });
+      return;
+    }
 
-        const decision: CheckDecision = await checker.check({
-          toolType: mapOpenCodeToolType(perm.toolName ?? ""),
-          toolName: perm.toolName ?? "",
-          toolInput: perm.toolInput as Record<string, unknown> | undefined,
-          safetyMode: perm.safetyMode,
-        });
+    debugLog("permission.ask triggered", { toolName: (perm as any)?.toolName });
 
-        // hub 明确返回的决策，照办
-        if (decision === "allow") {
-          output.status = "allow";
-        } else if (decision === "deny") {
-          output.status = "deny";
+    try {
+      const { checker, reporter } = await getOrInitSDK();
 
-          // 上报权限拒绝事件（fire-and-forget，不阻塞主流程）
-          reporter
-            .reportEvent({
-              type: "permission_denied",
-              agentId: sdkConfig?.agentId ?? "",
-              payload: {
-                toolName: perm.toolName,
-                toolInput: perm.toolInput,
-                reason: "denied_by_rules",
-              },
-              timestamp: Date.now(),
-            })
-            .catch(() => {});
-        } else {
-          // "ask" — 保持默认，让 OpenCode 弹窗询问用户
-          output.status = "ask";
-        }
-      } catch (err) {
-        // 够不到 hub（SDK 初始化失败 / checker 超时 / 缓存不可读）
-        // 降级策略：safety mode 开 → fail-closed；关 → 放行 + 大声日志 + 事件补传
-        const safetyOn = perm.safetyMode === true;
-        const toolName = perm.toolName ?? "unknown";
+      const decision: CheckDecision = await checker.check({
+        toolType: mapOpenCodeToolType((perm as any)?.toolName ?? ""),
+        toolName: (perm as any)?.toolName ?? "",
+        toolInput: (perm as any)?.toolInput as Record<string, unknown> | undefined,
+        safetyMode: (perm as any)?.safetyMode,
+      });
 
-        if (safetyOn) {
-          // safety mode 开启 → fail-closed（不能偷偷放行）
-          if (!degradedLogged.has(toolName)) {
-            degradedLogged.add(toolName);
-            console.warn(
-              `[AgentHub] PERMISSION FAIL-CLOSED: hub unreachable + safetyMode=on, denying tool=${toolName}`,
-            );
-          }
-          output.status = "deny";
-        } else {
-          // safety mode 关闭 → 降级放行
-          if (!degradedLogged.has(toolName)) {
-            degradedLogged.add(toolName);
-            console.warn(
-              `[AgentHub] PERMISSION DEGRADED: hub unreachable, allowing tool=${toolName} (safetyMode=off)`,
-            );
-          }
-          output.status = "allow";
+      if (decision === "allow") {
+        output.status = "allow";
+      } else if (decision === "deny") {
+        output.status = "deny";
 
-          // 顺手 enqueue permission_degraded 事件，靠 DataReporter 批量窗口在 hub 恢复后补传（可能丢）
-          try {
-            const { reporter } = getSDK();
-            reporter
-              .reportEvent({
-                type: "permission_degraded",
-                agentId: sdkConfig?.agentId ?? "",
-                payload: {
-                  toolName,
-                  toolInput: perm.toolInput,
-                  reason: err instanceof Error ? err.message : String(err),
-                  safetyMode: safetyOn,
-                },
-                timestamp: Date.now(),
-              })
-              .catch(() => {});
-          } catch {
-            // 事件补传失败不影响降级放行
-          }
-        }
-      }
-    },
-
-    /**
-     * Hook 2：tool.execute.before — 工具调用上报（旁路不阻断）
-     *
-     * 在 Agent 执行工具调用前触发。
-     * 异步上报工具调用事件，不 await，不阻塞主流程。
-     */
-    "tool.execute.before": (input: { tool: string; sessionID: string; callID: string }, output: { args: any }) => {
-      // 调试：写文件确认 hook 被触发
-      try {
-        fs.appendFileSync("/tmp/agent-hub-plugin.log", `[${new Date().toISOString()}] tool.execute.before triggered: tool=${input.tool}, sessionID=${input.sessionID}\n`);
-      } catch {}
-      console.log("[agent-hub] hook triggered: tool.execute.before", input.tool);
-      try {
-        const { reporter } = getSDK();
-
-        // 即时上报，不等待批量窗口
         reporter
-          .reportImmediately({
-            type: "tool_call",
+          .reportEvent({
+            type: "permission_denied",
             agentId: sdkConfig?.agentId ?? "",
             payload: {
-              toolName: input.tool,
-              toolInput: output.args,
-              sessionId: input.sessionID,
-              callID: input.callID,
+              toolName: (perm as any)?.toolName,
+              toolInput: (perm as any)?.toolInput,
+              reason: "denied_by_rules",
             },
             timestamp: Date.now(),
           })
           .catch(() => {});
-      } catch {
-        // 上报失败不阻塞工具执行
+      } else {
+        output.status = "ask";
       }
-    },
+    } catch (err) {
+      // 够不到 hub → 降级策略：safety mode 开 → fail-closed；关 → 放行
+      const safetyOn = (perm as any)?.safetyMode === true;
+      const toolName = (perm as any)?.toolName ?? "unknown";
 
-    // 注意：opencode 插件 API 没有 "llm.completion" hook
-    // Token 用量追踪暂时通过 tool.execute.after 或 chat.message 实现（后续）
-    // 当前阶段只做权限检查 + 工具调用上报
+      if (safetyOn) {
+        if (!degradedLogged.has(toolName)) {
+          degradedLogged.add(toolName);
+          console.warn(`[AgentHub] PERMISSION FAIL-CLOSED: hub unreachable + safetyMode=on, denying tool=${toolName}`);
+        }
+        output.status = "deny";
+      } else {
+        if (!degradedLogged.has(toolName)) {
+          degradedLogged.add(toolName);
+          console.warn(`[AgentHub] PERMISSION DEGRADED: hub unreachable, allowing tool=${toolName} (safetyMode=off)`);
+        }
+        output.status = "allow";
+
+        try {
+          const { reporter } = getSDK();
+          reporter
+            .reportEvent({
+              type: "permission_degraded",
+              agentId: sdkConfig?.agentId ?? "",
+              payload: {
+                toolName,
+                toolInput: (perm as any)?.toolInput,
+                reason: err instanceof Error ? err.message : String(err),
+                safetyMode: safetyOn,
+              },
+              timestamp: Date.now(),
+            })
+            .catch(() => {});
+        } catch {
+          // 事件补传失败不影响降级放行
+        }
+      }
+    }
+  },
+
+  /**
+   * Hook 2：tool.execute.before — 工具调用上报（旁路不阻断）
+   *
+   * 非 opc-agents 项目：不上报。
+   */
+  "tool.execute.before": (input: { tool: string; sessionID: string; callID: string }, output: { args: any }) => {
+    // 项目作用域：非 opc-agents 项目不上报
+    if (!isOpcAgentsProject()) {
+      return;
+    }
+
+    debugLog("tool.execute.before triggered", { tool: input.tool, sessionID: input.sessionID });
+
+    try {
+      const { reporter } = getSDK();
+
+      reporter
+        .reportImmediately({
+          type: "tool_call",
+          agentId: sdkConfig?.agentId ?? "",
+          payload: {
+            toolName: input.tool,
+            toolInput: output.args,
+            sessionId: input.sessionID,
+            callID: input.callID,
+          },
+          timestamp: Date.now(),
+        })
+        .catch(() => {});
+    } catch {
+      // 上报失败不阻塞工具执行
+    }
+  },
+
+  /**
+   * Hook 3：event — 通用事件钩子，用于 token_usage 上报
+   *
+   * "llm.completion" hook 不存在。token 用量从 message.updated 事件的
+   * AssistantMessage 里取（properties.info.tokens: { input, output, reasoning, cache }）。
+   *
+   * 只处理 type === "message.updated" 且 info 有 tokens 字段的事件（AssistantMessage）。
+   * 非 opc-agents 项目：不上报。
+   */
+  event: async ({ event }: { event: any }) => {
+    try {
+      // 只处理 message.updated 事件
+      if (event?.type !== "message.updated") return;
+
+      const info = event?.properties?.info;
+      // AssistantMessage 才有 tokens 字段；UserMessage 没有
+      if (!info?.tokens) return;
+
+      // 项目作用域：从 AssistantMessage.path.cwd 获取
+      const cwd = info?.path?.cwd;
+      if (!isOpcAgentsProject(cwd)) {
+        return;
+      }
+
+      const tokens = info.tokens;
+      const totalTokens = (tokens.input ?? 0) + (tokens.output ?? 0) + (tokens.reasoning ?? 0);
+
+      // 跳过 0 token 的消息（比如系统消息）
+      if (totalTokens === 0) return;
+
+      debugLog("token_usage from message.updated", {
+        modelID: info.modelID,
+        providerID: info.providerID,
+        sessionID: info.sessionID,
+        cost: info.cost,
+        tokens,
+        totalTokens,
+      });
+
+      const { reporter } = getSDK();
+
+      reporter
+        .reportImmediately({
+          type: "token_usage",
+          agentId: sdkConfig?.agentId ?? "",
+          payload: {
+            model: info.modelID ?? "unknown",
+            provider: info.providerID ?? "unknown",
+            sessionId: info.sessionID,
+            messageID: info.id,
+            cost: info.cost ?? 0,
+            promptTokens: tokens.input ?? 0,
+            completionTokens: tokens.output ?? 0,
+            reasoningTokens: tokens.reasoning ?? 0,
+            cacheReadTokens: tokens.cache?.read ?? 0,
+            cacheWriteTokens: tokens.cache?.write ?? 0,
+            totalTokens,
+          },
+          timestamp: Date.now(),
+        })
+        .catch(() => {});
+    } catch {
+      // event hook 失败不影响主流程
+    }
+  },
 };
 
 // OpenCode 插件必须导出为函数（可以是 async），调用后返回 Hooks 对象
-// 参考 ~/.config/opencode/plugins/herdr-agent-state.js 的格式
 // 注意：必须直接返回 Hooks 对象（包含 hook 函数），不能返回 { name, hooks } 包装
-// 直接导出对象会报 "Plugin export is not a function"
 export default async function agentHubPlugin() {
   return opencodeHooks;
 }
@@ -201,8 +275,6 @@ let sdkConfig: PluginConfig | null = null;
 let initPromise: Promise<typeof sdkInstance> | null = null;
 
 // 模块加载时同步读一次 config，消除 agentId/authToken 的初始化竞态
-// （permission.ask 是 async，第一条 tool.execute.before 可能在 initSDK 完成前触发，
-//  导致 payload agentId=""、reporter authToken="" → 外键失败 + 401）
 (function loadConfigSync() {
   try {
     const p = path.join(os.homedir(), ".agent-hub", "config.json");
@@ -221,11 +293,6 @@ let initPromise: Promise<typeof sdkInstance> | null = null;
   }
 })();
 
-/**
- * 惰性初始化 SDK 各模块。
- * 缓存结果，多次调用返回同一实例。
- * 初始化失败不抛异常，返回一个降级实例（所有检查默认放行）。
- */
 async function initSDK(configDir?: string): Promise<{
   cache: LocalCache;
   checker: PermissionChecker;
@@ -237,7 +304,6 @@ async function initSDK(configDir?: string): Promise<{
   const checker = new PermissionChecker(cache);
   const keyManager = new KeyManager(cache);
 
-  // 尝试加载配置
   try {
     const raw = await cache.get<PluginConfig>("config");
     sdkConfig = raw ?? { apiBaseUrl: "http://localhost:3000", authToken: "", agentId: "" };
@@ -251,21 +317,15 @@ async function initSDK(configDir?: string): Promise<{
     agentId: sdkConfig.agentId,
   });
 
-  // 启动 Reporter（后台心跳 + 定时 flush）
   try {
     await reporter.start();
   } catch {
-    // 启动失败不影响主流程
     console.warn("[AgentHub] DataReporter start failed, telemetry will not be sent");
   }
 
   return { cache, checker, keyManager, reporter };
 }
 
-/**
- * 获取或初始化 SDK（惰性单例）。
- * 如果初始化中，等待初始化完成。
- */
 async function getOrInitSDK(): Promise<{
   cache: LocalCache;
   checker: PermissionChecker;
@@ -281,20 +341,14 @@ async function getOrInitSDK(): Promise<{
         return instance;
       })
       .catch((err) => {
-        console.warn(
-          `[AgentHub] SDK init failed, using degraded mode: ${err instanceof Error ? err.message : String(err)}`,
-        );
-        // 降级：创建空实例，所有检查放行
+        console.warn(`[AgentHub] SDK init failed, using degraded mode: ${err instanceof Error ? err.message : String(err)}`);
         const cache = new LocalCache();
+        const config = sdkConfig ?? { apiBaseUrl: "http://localhost:3000", authToken: "", agentId: "" };
         const instance = {
           cache,
           checker: new PermissionChecker(cache),
           keyManager: new KeyManager(cache),
-          reporter: new DataReporter({
-            apiBaseUrl: "http://localhost:3000",
-            authToken: "",
-            agentId: "",
-          }),
+          reporter: new DataReporter(config),
         };
         sdkInstance = instance;
         return instance;
@@ -306,8 +360,8 @@ async function getOrInitSDK(): Promise<{
 
 /**
  * 同步获取已初始化的 SDK 实例（不等待初始化）。
- * 如果尚未初始化，返回一个临时降级实例。
- * 用于 tool.execute.before 和 llm.completion 这些旁路 hook。
+ * 如果尚未初始化，返回一个临时降级实例（用 sdkConfig，不写死空值）。
+ * 用于 tool.execute.before 和 event 这些旁路 hook。
  */
 function getSDK(): {
   cache: LocalCache;
@@ -317,8 +371,6 @@ function getSDK(): {
 } {
   if (sdkInstance) return sdkInstance;
 
-  // 临时降级实例：用 sdkConfig（模块加载时已同步读取），而不是写死空值
-  // 之前写死 authToken:"" / agentId:"" 导致 401，即时上报失败
   const cache = new LocalCache();
   const config = sdkConfig ?? {
     apiBaseUrl: "http://localhost:3000",
@@ -337,11 +389,6 @@ function getSDK(): {
 // Helpers
 // ──────────────────────────────────────────────
 
-/**
- * 将 OpenCode 工具名映射到 Agent Hub 的工具类型。
- * OpenCode 的工具名是 PascalCase（如 "Read", "Bash", "Edit"），
- * 需要映射到 checker 使用的 snake_case（如 "read", "bash", "edit"）。
- */
 function mapOpenCodeToolType(toolName: string): string {
   const map: Record<string, string> = {
     Read: "read",
