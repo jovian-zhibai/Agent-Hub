@@ -143,7 +143,13 @@ export async function POST(request: NextRequest) {
           select: { eventId: true },
         });
         const existingIds = new Set(existing.map((e) => e.eventId));
-        const newEvents = processed.filter((e) => !existingIds.has(e.eventId));
+        // token_usage 是流式递增的（message.updated 触发多次，totalTokens 递增），
+        // 相同 eventId 的新事件 totalTokens 更大，必须 upsert 更新为最新值。
+        // 所以 token_usage 不过滤已存在的，全部进入处理。
+        // 其他事件类型（tool_call/heartbeat 等）保持 insert-ignore 语义。
+        const newEvents = processed.filter(
+          (e) => !existingIds.has(e.eventId) || e.event.eventType === "token_usage",
+        );
 
         if (newEvents.length > 0) {
           // B1/B3: load pricing once for the entire batch
@@ -165,13 +171,23 @@ export async function POST(request: NextRequest) {
             for (const { event, eventId, reportedAt } of newEvents) {
               // S6: Catch P2002 (unique constraint violation) for concurrent duplicates
               try {
-                await tx.telemetryLog.create({
-                  data: {
+                // 用 upsert 而不是 create：
+                // token_usage 是流式递增的（message.updated 触发多次，totalTokens 递增），
+                // 相同 eventId 的新事件 totalTokens 更大，必须更新为最新值。
+                // 如果用 insert-ignore，会留下最小的部分值，成本偏低。
+                // 其他事件类型（tool_call/heartbeat 等）的 eventId 是唯一的，upsert 也安全。
+                await tx.telemetryLog.upsert({
+                  where: { eventId },
+                  create: {
                     eventId,
                     agentId: event.agentId,
                     keyId: event.keyId || null,
                     accountId: userId,
                     eventType: event.eventType as any,
+                    payload: (event.payload || {}) as any,
+                    reportedAt,
+                  },
+                  update: {
                     payload: (event.payload || {}) as any,
                     reportedAt,
                   },
@@ -206,10 +222,24 @@ export async function POST(request: NextRequest) {
                 const providerId = event.keyId ? keyProviderMap.get(event.keyId) : undefined;
                 const { cost, tokensIn, tokensOut } = computeEventCost(event.payload, pricingMap, providerId);
 
+                // token_usage 是流式递增的，upsert 时需要计算差值，避免重复增加 monthlySpent
+                // 先查询旧事件（如果存在），计算旧 cost，然后只增加差值
+                let costDelta = cost;
+                if (existingIds.has(eventId)) {
+                  const oldEvent = await tx.telemetryLog.findUnique({
+                    where: { eventId },
+                    select: { payload: true },
+                  });
+                  if (oldEvent?.payload) {
+                    const oldCost = computeEventCost(oldEvent.payload as any, pricingMap, providerId).cost;
+                    costDelta = cost - oldCost;
+                  }
+                }
+
                 // S4: Use update return value (atomic) instead of read-then-write
                 const updatedAgent = await tx.agent.update({
                   where: { id: event.agentId },
-                  data: { monthlySpent: { increment: cost } },
+                  data: { monthlySpent: { increment: costDelta } },
                   select: {
                     monthlySpent: true,
                     monthlyBudget: true,
@@ -218,7 +248,7 @@ export async function POST(request: NextRequest) {
                 });
 
                 const newSpent = Number(updatedAgent.monthlySpent);
-                const prevSpent = newSpent - cost;
+                const prevSpent = newSpent - costDelta;
                 const monthlyBudget = updatedAgent.monthlyBudget
                   ? Number(updatedAgent.monthlyBudget)
                   : null;
