@@ -25,13 +25,10 @@ const DEBUG = process.env.AGENT_HUB_DEBUG === "1";
 
 function debugLog(message: string, data?: unknown): void {
   if (!DEBUG) return;
-  const line = `[${new Date().toISOString()}] [pi] ${message}${data !== undefined ? " " + JSON.stringify(data).slice(0, 400) : ""}`;
-  console.log(`[agent-hub] ${line}`);
-  try {
-    fs.appendFileSync("/tmp/agent-hub-plugin.log", line + "\n");
-  } catch {
-    // 写文件失败不影响主流程
-  }
+  const line = `[${new Date().toISOString()}] [pi] ${message}${data !== undefined ? " " + JSON.stringify(data).slice(0, 400) : ""}\n`;
+  // 只写文件，绝不写 stdout/stderr（TUI 下 console 会冲乱屏幕和输入行）
+  // 异步追加，不阻塞主线程
+  fs.appendFile("/tmp/agent-hub-plugin.log", line, () => {});
 }
 
 // ──────────────────────────────────────────────
@@ -88,7 +85,7 @@ function getReporter(): DataReporter | null {
   const config = loadConfig();
   if (!config) {
     initFailed = true;
-    console.warn("[AgentHub] Pi extension: config not found, telemetry disabled");
+    debugLog("config not found, telemetry disabled");
     return null;
   }
 
@@ -99,8 +96,9 @@ function getReporter(): DataReporter | null {
     agentId: config.agentId,
   });
 
+  // reporter.start() 是 fire-and-forget，不阻塞调用方
   reporter.start().catch(() => {
-    console.warn("[AgentHub] Pi extension: DataReporter start failed, telemetry will not be sent");
+    debugLog("DataReporter start failed, telemetry will not be sent");
   });
 
   return reporter;
@@ -240,6 +238,9 @@ export default function (pi: any) {
           cacheRead: usage?.cacheRead ?? 0,
           cacheWrite: usage?.cacheWrite ?? 0,
           reasoningTokens: usage?.reasoning ?? 0,
+          // Pi 的 usage.cost = { input, output, cacheRead, cacheWrite, total } 是现成的美元成本
+          cost: usage?.cost ?? {},
+          costTotal: usage?.cost?.total ?? 0,
         },
         timestamp: Date.now(),
       }).catch(() => {});
@@ -259,7 +260,8 @@ export default function (pi: any) {
       // ignore
     }
   };
+  // 只监听 beforeExit，让进程自然退出，不调 process.exit
+  // 不监听 SIGINT/SIGTERM：Pi TUI 在 raw-mode 下 Ctrl+C 是字节不是信号，
+  // 而且 process.exit(0) 会打断 Pi 自己的收尾流程。
   process.on("beforeExit", stopOnExit);
-  process.on("SIGINT", () => { stopOnExit(); process.exit(0); });
-  process.on("SIGTERM", () => { stopOnExit(); process.exit(0); });
 }

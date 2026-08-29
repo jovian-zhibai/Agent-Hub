@@ -4,6 +4,20 @@
 // ──────────────────────────────────────────────
 
 import { LocalCache } from "./local-cache";
+import * as fs from "node:fs";
+
+// ──────────────────────────────────────────────
+// 文件日志（绝不写 stdout/stderr，避免污染 TUI）
+// 只在 AGENT_HUB_DEBUG=1 时写，异步追加，不阻塞主线程
+// ──────────────────────────────────────────────
+const DEBUG = process.env.AGENT_HUB_DEBUG === "1";
+const LOG_FILE = "/tmp/agent-hub-sdk.log";
+
+function fileLog(message: string, data?: unknown): void {
+  if (!DEBUG) return;
+  const line = `[${new Date().toISOString()}] [sdk] ${message}${data !== undefined ? " " + JSON.stringify(data).slice(0, 500) : ""}\n`;
+  fs.appendFile(LOG_FILE, line, () => {}); // 异步，忽略错误
+}
 
 // ──────────────────────────────────────────────
 // Types
@@ -49,11 +63,24 @@ const MAX_OFFLINE_EVENTS = 5_000;
 
 /**
  * Generate a deterministic event ID for idempotent ingestion.
+ *
+ * 按事件类型生成稳定 id：
+ * - token_usage: agentId + sessionId + messageId（流式重复会塌缩为同一条，服务端 upsert 取最新）
+ * - tool_call: agentId + toolCallId + timestamp（同一工具调用只有一条，timestamp 防同毫秒碰撞）
+ * - 其他: agentId + type + timestamp
+ *
+ * 注意：之前的实现读 payload.tool（实际字段是 toolName，恒为 unknown），
+ * 且 id 含 timestamp 导致 OpenCode 流式重复去不掉重。
  */
 function generateEventId(event: TelemetryEvent): string {
-  const tool = String(event.payload?.tool || "unknown");
-  const model = String(event.payload?.model || "unknown");
-  return `${event.agentId}::${event.timestamp}::${event.type}::${tool}::${model}`;
+  const p = event.payload || {};
+  if (event.type === "token_usage") {
+    return `${event.agentId}::token_usage::${p.sessionId ?? ""}::${p.messageId ?? ""}`;
+  }
+  if (event.type === "tool_call") {
+    return `${event.agentId}::tool_call::${p.toolCallId ?? p.callID ?? p.sessionId ?? ""}::${event.timestamp}`;
+  }
+  return `${event.agentId}::${event.type}::${event.timestamp}`;
 }
 
 // ──────────────────────────────────────────────
@@ -142,17 +169,18 @@ export class DataReporter {
           "Connection": "close", // 禁用 keep-alive，防止 HTTP 连接阻止进程退出
         },
         body,
+        signal: AbortSignal.timeout(5000), // 5s 上限，避免请求挂死拖住退出
       });
 
       if (!response.ok) {
         // Fallback：立即上报失败，丢进缓冲区等批量发
         this.buffer.push(eventWithId);
-        console.warn("[AgentHub] Immediate report failed, queued for batch");
+        fileLog("Immediate report failed, queued for batch", { status: response.status });
       }
     } catch (err) {
       // 网络错误也丢进缓冲区
       this.buffer.push(eventWithId);
-      console.warn("[AgentHub] Immediate report error, queued for batch:", err);
+      fileLog("Immediate report error, queued for batch", { error: err instanceof Error ? err.message : String(err) });
     } finally {
       this.sending = false;
     }
@@ -224,8 +252,8 @@ export class DataReporter {
     }, HEARTBEAT_INTERVAL_MS);
     this.heartbeatTimer.unref?.();
 
-    // Send an initial heartbeat immediately
-    await this.sendHeartbeat();
+    // Send an initial heartbeat immediately (fire-and-forget，不阻塞启动)
+    void this.sendHeartbeat();
   }
 
   /**
@@ -243,6 +271,16 @@ export class DataReporter {
     if (this.heartbeatTimer !== null) {
       clearInterval(this.heartbeatTimer);
       this.heartbeatTimer = null;
+    }
+
+    // 释放 HTTP 连接池（undici 的 keep-alive socket 会阻止进程退出）
+    try {
+      const { getGlobalDispatcher } = await import("undici");
+      await getGlobalDispatcher().close();
+      fileLog("HTTP dispatcher closed");
+    } catch {
+      // undici 不可用则忽略（Node.js 内置 fetch 可能没有独立的 undici 模块）
+      fileLog("undici not available, skipping dispatcher close");
     }
   }
 
@@ -288,6 +326,7 @@ export class DataReporter {
         agentId: this.config.agentId,
         sentAt: Date.now(),
       }),
+      signal: AbortSignal.timeout(5000), // 5s 上限，避免请求挂死拖住退出
     });
 
     if (!response.ok) {
@@ -329,14 +368,15 @@ export class DataReporter {
           agentId: this.config.agentId,
           sentAt: Date.now(),
         }),
+        signal: AbortSignal.timeout(5000), // 5s 上限，避免请求挂死拖住退出
       });
 
       if (!response.ok) {
         // Non-critical — log and move on
-        console.warn(`[DataReporter] Heartbeat failed: ${response.status}`);
+        fileLog("Heartbeat failed", { status: response.status });
       }
     } catch (err) {
-      console.warn(`[DataReporter] Heartbeat error: ${err instanceof Error ? err.message : String(err)}`);
+      fileLog("Heartbeat error", { error: err instanceof Error ? err.message : String(err) });
     }
   }
 
@@ -358,7 +398,7 @@ export class DataReporter {
       await this.cache.set(OFFLINE_CACHE_KEY, allEvents, { version: 1 });
     } catch {
       // Offline cache failure is non-fatal — events are lost
-      console.warn("[DataReporter] Failed to store events in offline cache");
+      fileLog("Failed to store events in offline cache");
     }
   }
 
@@ -389,9 +429,7 @@ export class DataReporter {
 
       // If still failing, re-cache with remaining events
       if (lastError) {
-        console.warn(
-          `[DataReporter] Failed to replay ${cached.length} offline events: ${lastError.message}`,
-        );
+        fileLog("Failed to replay offline events", { count: cached.length, error: lastError.message });
         await this.cache.set(OFFLINE_CACHE_KEY, cached, { version: 1 }).catch(() => {});
       }
     } catch {

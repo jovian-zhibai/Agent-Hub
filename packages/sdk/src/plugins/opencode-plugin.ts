@@ -26,13 +26,10 @@ const DEBUG = process.env.AGENT_HUB_DEBUG === "1";
 
 function debugLog(message: string, data?: unknown): void {
   if (!DEBUG) return;
-  const line = `[${new Date().toISOString()}] ${message}${data !== undefined ? " " + JSON.stringify(data).slice(0, 300) : ""}`;
-  console.log(`[agent-hub] ${line}`);
-  try {
-    fs.appendFileSync("/tmp/agent-hub-plugin.log", line + "\n");
-  } catch {
-    // 写文件失败不影响主流程
-  }
+  const line = `[${new Date().toISOString()}] [opencode] ${message}${data !== undefined ? " " + JSON.stringify(data).slice(0, 300) : ""}\n`;
+  // 只写文件，绝不写 stdout/stderr（TUI 下 console 会冲乱屏幕和输入行）
+  // 异步追加，不阻塞主线程
+  fs.appendFile("/tmp/agent-hub-plugin.log", line, () => {});
 }
 
 // ──────────────────────────────────────────────
@@ -67,23 +64,6 @@ const degradedLogged = new Set<string>();
 // ──────────────────────────────────────────────
 
 const opencodeHooks = {
-  /**
-   * dispose — 插件卸载/进程退出时调用
-   *
-   * 必须停止 DataReporter 的定时器，否则 setInterval 会阻止 Node.js 进程退出
-   * （OpenCode 退不出去、Ctrl+C 没反应的根因）。
-   * DataReporter 的 timer 也加了 .unref() 作为双重保险。
-   */
-  dispose: async () => {
-    debugLog("dispose: stopping DataReporter");
-    try {
-      const { reporter } = getSDK();
-      await reporter.stop();
-    } catch {
-      // stop 失败不影响退出
-    }
-  },
-
   /**
    * Hook 1：permission.ask — 权限拦截（核心）
    *
@@ -138,13 +118,13 @@ const opencodeHooks = {
       if (safetyOn) {
         if (!degradedLogged.has(toolName)) {
           degradedLogged.add(toolName);
-          console.warn(`[AgentHub] PERMISSION FAIL-CLOSED: hub unreachable + safetyMode=on, denying tool=${toolName}`);
+          debugLog("PERMISSION FAIL-CLOSED: hub unreachable + safetyMode=on, denying tool", { toolName });
         }
         output.status = "deny";
       } else {
         if (!degradedLogged.has(toolName)) {
           degradedLogged.add(toolName);
-          console.warn(`[AgentHub] PERMISSION DEGRADED: hub unreachable, allowing tool=${toolName} (safetyMode=off)`);
+          debugLog("PERMISSION DEGRADED: hub unreachable, allowing tool (safetyMode=off)", { toolName });
         }
         output.status = "allow";
 
@@ -253,7 +233,7 @@ const opencodeHooks = {
             model: info.modelID ?? "unknown",
             provider: info.providerID ?? "unknown",
             sessionId: info.sessionID,
-            messageID: info.id,
+            messageId: info.id,
             cost: info.cost ?? 0,
             promptTokens: tokens.input ?? 0,
             completionTokens: tokens.output ?? 0,
@@ -334,11 +314,11 @@ async function initSDK(configDir?: string): Promise<{
     agentId: sdkConfig.agentId,
   });
 
-  try {
-    await reporter.start();
-  } catch {
-    console.warn("[AgentHub] DataReporter start failed, telemetry will not be sent");
-  }
+  // reporter.start() 是 fire-and-forget，不阻塞 permission.ask
+  // （start 里会发初始 heartbeat，可能涉及网络，不能让权限决策等它）
+  void reporter.start().catch(() => {
+    debugLog("DataReporter start failed, telemetry will not be sent");
+  });
 
   return { cache, checker, keyManager, reporter };
 }
@@ -358,7 +338,7 @@ async function getOrInitSDK(): Promise<{
         return instance;
       })
       .catch((err) => {
-        console.warn(`[AgentHub] SDK init failed, using degraded mode: ${err instanceof Error ? err.message : String(err)}`);
+        debugLog("SDK init failed, using degraded mode", { error: err instanceof Error ? err.message : String(err) });
         const cache = new LocalCache();
         const config = sdkConfig ?? { apiBaseUrl: "http://localhost:3000", authToken: "", agentId: "" };
         const instance = {
@@ -422,23 +402,22 @@ function mapOpenCodeToolType(toolName: string): string {
 // ──────────────────────────────────────────────
 // 进程退出时停止 DataReporter（防止定时器/HTTP连接阻止退出）
 //
+// 只监听 beforeExit，让进程自然退出，不调 process.exit。
+// 不监听 SIGINT/SIGTERM：OpenCode TUI 在 raw-mode 下 Ctrl+C 是字节不是信号，
+// 而且 process.exit(0) 会打断 OpenCode 自己的收尾流程。
+//
 // 三重保险：
 // 1. DataReporter 的 timer 加了 .unref()
-// 2. fetch 请求加了 Connection: close 头（禁用 keep-alive）
-// 3. 这里监听进程退出事件，显式调用 reporter.stop()
-//
-// 注意：OpenCode 的 Hooks 接口可能没有 dispose 字段（类型定义里找不到），
-// 所以用 process 事件作为兜底。
+// 2. fetch 请求加了 Connection: close + AbortSignal.timeout(5000)
+// 3. stop() 里关 undici dispatcher 释放 HTTP 连接池
 // ──────────────────────────────────────────────
 function stopReporterOnExit() {
   try {
     const { reporter } = getSDK();
-    reporter.stop().catch(() => {});
+    void reporter.stop(); // fire-and-forget，不阻塞 beforeExit
   } catch {
     // ignore
   }
 }
 
 process.on("beforeExit", stopReporterOnExit);
-process.on("SIGINT", () => { stopReporterOnExit(); process.exit(0); });
-process.on("SIGTERM", () => { stopReporterOnExit(); process.exit(0); });
