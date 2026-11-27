@@ -63,8 +63,8 @@ REDIS_URL="redis://localhost:6379"
 
 ```bash
 # 1. Clone repository
-git clone https://github.com/yourusername/agent-hub.git
-cd agent-hub
+git clone https://github.com/jovian-zhibai/Agent-Hub.git
+cd Agent-Hub
 
 # 2. Create production environment file
 cp .env.example .env.production
@@ -196,8 +196,8 @@ apt-get install -y nodejs
 apt-get install -y postgresql postgresql-contrib
 
 # 4. Clone repository
-git clone https://github.com/yourusername/agent-hub.git
-cd agent-hub
+git clone https://github.com/jovian-zhibai/Agent-Hub.git
+cd Agent-Hub
 
 # 5. Setup
 npm install
@@ -231,8 +231,8 @@ ssh -i your-key.pem ec2-user@your-instance
 sudo yum install -y git nodejs
 
 # 6. Clone and setup
-git clone https://github.com/yourusername/agent-hub.git
-cd agent-hub
+git clone https://github.com/jovian-zhibai/Agent-Hub.git
+cd Agent-Hub
 npm install
 
 # 7. Set environment variables
@@ -447,6 +447,6 @@ Configure CDN (Cloudflare, CloudFront) for:
 ## Support
 
 For deployment issues:
-- Check [GitHub Issues](https://github.com/yourusername/agent-hub/issues)
+- Check [GitHub Issues](https://github.com/jovian-zhibai/Agent-Hub/issues)
 - Join [Discord Community](#)
 - Email support@agent-hub.dev
