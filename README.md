@@ -69,8 +69,8 @@ Perfect for developers using AI coding assistants like OpenCode, Claude Code, Cu
 
 ```bash
 # Clone the repository
-git clone https://github.com/yourusername/agent-hub.git
-cd agent-hub
+git clone https://github.com/jovian-zhibai/Agent-Hub.git
+cd Agent-Hub
 
 # Automated setup (installs dependencies, sets up database, generates secrets)
 npm run setup
@@ -151,7 +151,7 @@ NEXT_PUBLIC_API_URL="http://localhost:3000/api"
 
 ### API Reference
 
-See [API.md](./docs/API.md) for complete API documentation.
+HTTP API routes live under `src/app/api/v1`; see [ARCHITECTURE.md](./docs/ARCHITECTURE.md) for the component and data-flow overview.
 
 ### CLI Commands
 
@@ -181,8 +181,8 @@ agent-hub/
 │   │   ├── agents/       # Agent pages
 │   │   └── keys/         # Key management pages
 │   ├── components/       # React components
-│   ├── lib/              # Utility functions
-│   └── hooks/            # React hooks
+│   ├── contexts/         # React context providers
+│   └── lib/              # Utility functions
 ├── packages/
 │   ├── cli/              # CLI tool
 │   └── sdk/              # TypeScript SDK
@@ -259,9 +259,8 @@ This project is licensed under the MIT License - see the [LICENSE](./LICENSE) fi
 
 ## 📮 Contact
 
-- **Issues**: [GitHub Issues](https://github.com/yourusername/agent-hub/issues)
-- **Discussions**: [GitHub Discussions](https://github.com/yourusername/agent-hub/discussions)
-- **Twitter**: [@agent_hub](https://twitter.com/agent_hub)
+- **Issues**: [GitHub Issues](https://github.com/jovian-zhibai/Agent-Hub/issues)
+- **Discussions**: [GitHub Discussions](https://github.com/jovian-zhibai/Agent-Hub/discussions)
 
 ---
 
