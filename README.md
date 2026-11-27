@@ -84,6 +84,10 @@ Open [http://localhost:3000](http://localhost:3000) in your browser.
 ### Connecting Your First Agent
 
 ```bash
+# Build the CLI package first (its bin points at compiled dist output)
+cd packages/cli && npm install && npm run build
+cd ../..
+
 # Install the CLI globally
 npm link
 
