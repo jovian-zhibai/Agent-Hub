@@ -1,7 +1,7 @@
 {
   "name": "agent-hub",
   "version": "1.0.0",
-  "description": "",
+  "description": "AI Agent management platform — multi-key rotation, cost monitoring, permissions, and unified dashboard",
   "scripts": {
     "dev": "node scripts/dev.mjs start",
     "build": "next build",
@@ -16,9 +16,9 @@
     "test:coverage": "vitest run --coverage",
     "type-check": "tsc --noEmit"
   },
-  "keywords": [],
-  "author": "",
-  "license": "ISC",
+  "keywords": ["ai-agent", "api-key-management", "cost-monitoring", "permissions", "dashboard", "llm", "nextjs", "typescript"],
+  "author": "jovian-zhibai",
+  "license": "MIT",
   "dependencies": {
     "@prisma/adapter-pg": "^7.8.0",
     "@prisma/client": "^7.8.0",
