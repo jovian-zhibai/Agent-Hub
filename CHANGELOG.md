@@ -73,8 +73,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### UI
 - Modern dashboard built with Next.js and Tailwind CSS
 - Responsive design for mobile and desktop
-- Real-time metrics and charts
 - Dark theme support
 
-[Unreleased]: https://github.com/yourusername/agent-hub/compare/v1.0.0...HEAD
-[1.0.0]: https://github.com/yourusername/agent-hub/releases/tag/v1.0.0
+[Unreleased]: https://github.com/jovian-zhibai/Agent-Hub/compare/v1.0.0...HEAD
+[1.0.0]: https://github.com/jovian-zhibai/Agent-Hub/releases/tag/v1.0.0
