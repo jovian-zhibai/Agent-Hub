@@ -47,7 +47,7 @@ Perfect for developers using AI coding assistants like OpenCode, Claude Code, Cu
 
 ### 📊 Cost Analytics
 - **Real-Time Tracking**: Monitor token usage and costs as they happen
-- **Budget Alerts**: Get notified when agents approach spending limits
+- **Budget Thresholds**: At 80% of the monthly budget the agent crosses a warning threshold (audit log + SSE alert); at 100% it crosses the disable threshold and the agent is auto-disabled with reason `budget_exceeded`
 - **Detailed Breakdowns**: See costs per agent, model, and time period
 - **Export Reports**: CSV/JSON export for accounting
 
