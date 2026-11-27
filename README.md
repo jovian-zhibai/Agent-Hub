@@ -151,6 +151,15 @@ KEY_ENCRYPTION_KEY="<your-encryption-key>"
 
 # API
 NEXT_PUBLIC_API_URL="http://localhost:3000/api"
+
+# CORS origins, comma-separated; use "*" only for development
+ALLOWED_ORIGINS="http://localhost:3000,https://app.agent-hub.dev"
+
+# Bearer secret authenticating the /api/cron/* endpoints
+CRON_SECRET="<cron-secret>"
+
+# Telemetry log retention in days; aggregated hourly/daily rollups are kept indefinitely
+RETENTION_DAYS=90
 ```
 
 ### API Reference
@@ -189,7 +198,7 @@ agent-hub/
 │   └── lib/              # Utility functions
 ├── packages/
 │   ├── cli/              # CLI tool
-│   └── sdk/              # TypeScript SDK
+│   └── sdk/              # TypeScript SDK (see packages/sdk/README.md)
 ├── prisma/
 │   ├── schema.prisma     # Database schema
 │   └── migrations/       # Migration files
